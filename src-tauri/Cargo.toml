@@ -1,0 +1,30 @@
+[package]
+name = "easel"
+version = "0.1.0"
+description = "Easel: local-first AI image studio"
+edition = "2021"
+
+[lib]
+name = "easel_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+tokio = { version = "1", features = ["time", "fs", "process", "io-util", "macros", "rt"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rand = "0.8"
+log = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
