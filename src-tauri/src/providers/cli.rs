@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 const TIME_LIMIT: Duration = Duration::from_secs(300);
-const OUT_OF_USAGE_HINTS: &[&str] = &["usage limit", "rate limit", "quota", "limit reached", "credit balance"];
+const OUT_OF_USAGE_HINTS: &[&str] = &["usage limit", "rate limit", "quota", "limit reached", "credit balance", "hit your"];
 
 pub struct CliCall<'a> {
   /// Program name or full path, e.g. "claude" or "/usr/bin/agy".
@@ -114,6 +114,7 @@ mod tests {
   fn spots_usage_limits() {
     assert!(looks_out_of_usage("Claude AI usage limit reached|1760000000"));
     assert!(looks_out_of_usage("Error: Quota exceeded for model"));
+    assert!(looks_out_of_usage("You've hit your session limit · resets 3:45pm"));
     assert!(!looks_out_of_usage("{\"reply\":\"done\"}"));
   }
 
