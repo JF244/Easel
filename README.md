@@ -15,6 +15,29 @@ tracking. Everything you make is saved as normal files in `Pictures/Easel`.
 - **Gallery:** browse, search prompts, edit, open in PhotoCraft, delete.
 - **Your ComfyUI workflows:** run any workflow exported in API format,
   including local video (Wan and similar), with `{{prompt}}`-style placeholders.
+- **Apps:** the Crafting Apps, free open-source editors that replace the
+  Adobe suite. Easel finds the ones you have installed, opens each file in the
+  right one, and picks up what you save there. The Claude Code brain can also
+  use their tools to make exact edits for you ("add the title in white, crop to 16:9").
+
+| Instead of    | App                                                         | Opens                         |
+|---------------|-------------------------------------------------------------|-------------------------------|
+| Photoshop     | [PhotoCraft](https://github.com/storytold/photocraft)       | PNG, JPEG, WebP, PSD, TIFF    |
+| Illustrator   | [VectorCraft](https://github.com/storytold/vectorcraft)     | SVG, AI, EPS                  |
+| Premiere Pro  | [FilmCraft](https://github.com/storytold/filmcraft)         | MP4, MOV, MKV, WebM           |
+| Lightroom     | [LightCraft](https://github.com/storytold/lightcraft)       | DNG, CR2/CR3, NEF, ARW, RAF   |
+| Acrobat       | [PdfCraft](https://github.com/storytold/pdfcraft)           | PDF                           |
+| After Effects | [EffectCraft](https://github.com/storytold/effectcraft)     | (opened from the Apps page)   |
+| InDesign      | [DesignCraft](https://github.com/storytold/designcraft)     | IDML                          |
+
+Install them from each app's GitHub releases page (the Apps page links to
+them). Easel looks on your PATH, in the usual install folders, for AppImages
+in `~/Applications` or `~/Downloads`, and for Flatpak installs; you can also
+set a path by hand. For the brain to edit with an app, its command-line tool
+(`photocraft-cli` and so on) must be found too; every installer includes it.
+
+Editor jobs run Claude Code with only that app's tools allowed, on a copy of
+your file in a private work folder, so originals are never changed.
 
 ## Run it on CachyOS (or any Arch-based distro)
 

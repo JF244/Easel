@@ -4,9 +4,10 @@ import { api, errorMessage, type GalleryItem } from "../lib/api";
 import { useApp } from "../lib/store";
 import { ErrorNote } from "../components/ErrorNote";
 import { MediaThumb } from "../components/MediaThumb";
+import { openLabel } from "../components/ResultGrid";
 
 export default function GalleryPage() {
-  const { gallery, refreshGallery, removeFromGallery, editImage } = useApp();
+  const { gallery, apps, refreshGallery, removeFromGallery, editImage } = useApp();
   const [folder, setFolder] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<GalleryItem | null>(null);
@@ -153,7 +154,7 @@ export default function GalleryPage() {
                 <p className="text-ink-2">No prompt was saved with this file.</p>
               )}
               <div className="flex flex-wrap gap-2 pt-2">
-                {!selected.isVideo && (
+                {selected.kind === "image" && !selected.path.toLowerCase().endsWith(".svg") && (
                   <button type="button" className="btn btn-primary" onClick={() => editImage(selected.path)}>
                     Edit this
                   </button>
@@ -164,7 +165,7 @@ export default function GalleryPage() {
                   </button>
                 )}
                 <button type="button" className="btn" onClick={() => run(() => api.openInEditor(selected.path))}>
-                  Open in editor
+                  {openLabel(apps, selected.path)}
                 </button>
                 <button type="button" className="btn" onClick={() => run(() => revealItemInDir(selected.path))}>
                   Show in folder

@@ -1,11 +1,15 @@
+mod apps;
 mod brain;
+mod editor;
 mod gallery;
 mod providers;
 mod settings;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use apps::AppStatus;
 use brain::{ChatTurn, Improved, Plan, PlannerContext};
+use editor::{EditorJob, EditorResult};
 use gallery::{GalleryItem, MediaMeta};
 use providers::{comfy, gemini, local_llm, GenerateRequest, Provider};
 use settings::Settings;
@@ -23,6 +27,8 @@ struct AppState {
   pictures_dir: Option<PathBuf>,
   /// Empty folder the agent CLIs run in, so they can't browse your files.
   brain_dir: PathBuf,
+  /// Private folders where editor jobs work on copies.
+  jobs_dir: PathBuf,
   client: reqwest::Client,
 }
 
@@ -144,21 +150,59 @@ async fn local_models(state: State<'_, AppState>, url: String) -> Result<Vec<Str
   local_llm::list_models(&state.client, &url).await
 }
 
-/// Opens a result in PhotoCraft or whichever editor is set in Settings.
+#[tauri::command]
+fn apps_status(state: State<AppState>) -> Vec<AppStatus> {
+  let overrides = state.settings().apps;
+  apps::APPS.iter().map(|app| apps::status(app, &overrides)).collect()
+}
+
+/// Opens a Craft app, with a file if one is given.
+#[tauri::command]
+fn open_with_app(state: State<AppState>, app_id: String, path: Option<String>) -> Result<(), String> {
+  let app = apps::get(&app_id).ok_or("Easel doesn't know that app.")?;
+  if let Some(path) = &path {
+    if !gallery::is_media(Path::new(path)) {
+      return Err("That isn't a file the Craft apps open.".into());
+    }
+  }
+  apps::open(app, &state.settings().apps, path.as_deref().map(Path::new))
+}
+
+/// Opens a file in the Craft app made for it, or in your other editor.
 #[tauri::command]
 fn open_in_editor(state: State<AppState>, path: String) -> Result<(), String> {
-  let editor = state.settings().editor_path.trim().to_string();
-  if editor.is_empty() {
-    return Err("Set your editor (for example PhotoCraft) in Settings first.".into());
+  let file = Path::new(&path);
+  if !gallery::is_media(file) {
+    return Err("That isn't an image, video or document Easel knows.".into());
   }
-  if !gallery::is_media(Path::new(&path)) {
-    return Err("That isn't an image or video.".into());
+  let settings = state.settings();
+  if let Some(app) = apps::app_for(file) {
+    if apps::status(app, &settings.apps).gui.is_some() {
+      return apps::open(app, &settings.apps, Some(file));
+    }
+  }
+  let editor = settings.editor_path.trim().to_string();
+  if editor.is_empty() {
+    let hint = apps::app_for(file).map(|a| format!("Install {} (see the Apps page)", a.name)).unwrap_or_else(|| "Set an editor in Settings".into());
+    return Err(format!("No editor for this file yet. {hint}."));
   }
   std::process::Command::new(&editor)
     .arg(&path)
     .spawn()
     .map(|_| ())
     .map_err(|e| format!("Couldn't start {editor}: {e}"))
+}
+
+/// The brain (Claude Code) does a real edit in one of the Craft apps.
+#[tauri::command]
+async fn run_editor_job(state: State<'_, AppState>, job: EditorJob) -> Result<EditorResult, String> {
+  let settings = state.settings();
+  if let Some(input) = job.input_path.as_deref().filter(|p| !p.trim().is_empty()) {
+    if !Path::new(input).is_file() {
+      return Err("The input file doesn't exist anymore.".into());
+    }
+  }
+  editor::run(&settings.brain, &settings.apps, &state.jobs_dir, &state.output_dir(), &job).await
 }
 
 fn image_data_url(path: &Path) -> Result<String, String> {
@@ -203,6 +247,7 @@ pub fn run() {
       let config_dir = paths.app_config_dir()?;
       let settings_path = config_dir.join("settings.json");
       let brain_dir = paths.app_cache_dir()?.join("brain-workdir");
+      let jobs_dir = paths.app_cache_dir()?.join("editor-jobs");
       let pictures_dir = paths.picture_dir().ok();
       let settings = Settings::load(&settings_path);
       allow_output_dir(app.handle(), &settings.output_dir(pictures_dir.clone()));
@@ -213,7 +258,7 @@ pub fn run() {
         .timeout(Duration::from_secs(600))
         .build()?;
 
-      app.manage(AppState { settings: Mutex::new(settings), settings_path, pictures_dir, brain_dir, client });
+      app.manage(AppState { settings: Mutex::new(settings), settings_path, pictures_dir, brain_dir, jobs_dir, client });
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -230,6 +275,9 @@ pub fn run() {
       comfy_checkpoints,
       local_models,
       open_in_editor,
+      apps_status,
+      open_with_app,
+      run_editor_job,
     ])
     .run(tauri::generate_context!())
     .expect("Easel couldn't start");

@@ -10,7 +10,8 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-const TIME_LIMIT: Duration = Duration::from_secs(300);
+/// Long enough for a brain to plan; editor jobs pass their own, longer limit.
+pub const PLANNING_TIME_LIMIT: Duration = Duration::from_secs(300);
 const OUT_OF_USAGE_HINTS: &[&str] = &["usage limit", "rate limit", "quota", "limit reached", "credit balance", "hit your"];
 
 pub struct CliCall<'a> {
@@ -22,6 +23,7 @@ pub struct CliCall<'a> {
   pub work_dir: &'a Path,
   /// Shown in error messages, e.g. "Claude Code".
   pub label: &'a str,
+  pub time_limit: Duration,
 }
 
 pub async fn run(call: CliCall<'_>) -> Result<String, String> {
@@ -51,9 +53,9 @@ pub async fn run(call: CliCall<'_>) -> Result<String, String> {
     }
   })?;
 
-  let output = match tokio::time::timeout(TIME_LIMIT, child.wait_with_output()).await {
+  let output = match tokio::time::timeout(call.time_limit, child.wait_with_output()).await {
     Ok(result) => result.map_err(|e| format!("{} stopped unexpectedly: {e}", call.label))?,
-    Err(_) => return Err(format!("{} didn't answer within {} minutes", call.label, TIME_LIMIT.as_secs() / 60)),
+    Err(_) => return Err(format!("{} didn't finish within {} minutes", call.label, call.time_limit.as_secs() / 60)),
   };
   let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
   let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -127,6 +129,7 @@ mod tests {
       prompt: "hi".into(),
       work_dir: &dir,
       label: "Test CLI",
+      time_limit: PLANNING_TIME_LIMIT,
     })
     .await
     .unwrap_err();
@@ -144,6 +147,7 @@ mod tests {
       prompt: "a \"quoted\" prompt; $(not run)".into(),
       work_dir: &dir,
       label: "echo",
+      time_limit: PLANNING_TIME_LIMIT,
     })
     .await
     .unwrap();

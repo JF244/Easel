@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main window: app commands, file pickers, opening files and folders.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:allow-open",
@@ -11,7 +13,22 @@
     "opener:allow-reveal-item-in-dir",
     {
       "identifier": "opener:allow-open-path",
-      "allow": [{ "path": "$PICTURE/**" }, { "path": "$HOME/**" }]
+      "allow": [
+        {
+          "path": "$PICTURE/**"
+        },
+        {
+          "path": "$HOME/**"
+        }
+      ]
+    },
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://github.com/storytold/*"
+        }
+      ]
     }
   ]
 }

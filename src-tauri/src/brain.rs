@@ -3,7 +3,7 @@
 //! can't use, the next one gets the same request, and the reply says which
 //! brain answered and why the earlier ones were skipped.
 
-use crate::providers::cli::{self, CliCall};
+use crate::providers::cli::{self, CliCall, PLANNING_TIME_LIMIT};
 use crate::providers::{claude, local_llm};
 use crate::settings::{BrainKind, BrainSettings};
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,9 @@ Reply with one JSON object and nothing else (no code fences, no commentary):
   "reply": "one or two plain sentences to the person about what you're making, or a question if the request is unclear",
   "jobs": [
     {
-      "engine": "gemini" | "comfy" | "workflow",
+      "engine": "gemini" | "comfy" | "workflow" | "editor",
       "workflow": "name of the saved workflow, only when engine is workflow",
+      "app": "id of the editor app, only when engine is editor",
       "prompt": "the full prompt for the image model",
       "negative": "things to avoid (comfy and workflow only, optional)",
       "aspectRatio": "1:1" | "16:9" | "9:16" | "4:3" | "3:4" | "3:2" | "2:3",
@@ -32,7 +33,9 @@ Reply with one JSON object and nothing else (no code fences, no commentary):
 Rules:
 - Only use engines listed as available. If none are available, return no jobs and say what to set up.
 - Write prompts the way image models like them: subject, setting, composition, lighting, style. Keep any exact text the person wants shown in quotes.
-- Gemini is best for edits and following detailed instructions. Comfy runs on the person's own GPU for free.
+- Gemini is best for AI edits and following detailed instructions. Comfy runs on the person's own GPU for free.
+- "editor" jobs do precise, non-AI edits in a real editing app: cropping, resizing, color and exposure, adding exact text or a logo, layouts, vector art, PDF pages, video cuts. For an editor job, "prompt" is the step-by-step instruction for the app, and aspectRatio, count and negative are ignored. Prefer an editor job when the person wants exact text, an exact size, or wants to keep the picture itself unchanged.
+- You can chain jobs: generate a picture first, then a later turn can add text to it with an editor.
 - To change an existing image, set inputImage to its path, copied exactly from the list. Never invent paths.
 - count is 1 to 4. Use more than one job only when the person asks for different images.
 - If the request is a question, answer it in "reply" and return an empty jobs list."#;
@@ -58,8 +61,17 @@ pub struct PlannerContext {
   pub gemini_ready: bool,
   pub comfy_ready: bool,
   pub workflows: Vec<String>,
+  /// Editor apps the brain can drive: (id, what it does).
+  pub editors: Vec<ContextEditor>,
   /// Images the person attached or recently made: (path, prompt).
   pub images: Vec<ContextImage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ContextEditor {
+  pub id: String,
+  pub purpose: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -75,6 +87,7 @@ pub struct ContextImage {
 pub struct PlannedJob {
   pub engine: String,
   pub workflow: Option<String>,
+  pub app: Option<String>,
   pub prompt: String,
   pub negative: Option<String>,
   pub aspect_ratio: Option<String>,
@@ -145,13 +158,13 @@ async fn ask(client: &reqwest::Client, s: &BrainSettings, work_dir: &Path, kind:
         options.push("--model".into());
         options.push(s.claude_cli_model.trim().into());
       }
-      cli::run(CliCall { program: &s.claude_cli_path, options, prompt: user.into(), work_dir, label: "Claude Code" }).await
+      cli::run(CliCall { program: &s.claude_cli_path, options, prompt: user.into(), work_dir, label: "Claude Code", time_limit: PLANNING_TIME_LIMIT }).await
     }
     BrainKind::AgyCli => {
       // agy has no separate system prompt flag, so the instructions lead the prompt.
       let options = vec!["--output-format".into(), "text".into()];
       let prompt = format!("{system}\n\n---\n\n{user}");
-      cli::run(CliCall { program: &s.agy_cli_path, options, prompt, work_dir, label: "Antigravity" }).await
+      cli::run(CliCall { program: &s.agy_cli_path, options, prompt, work_dir, label: "Antigravity", time_limit: PLANNING_TIME_LIMIT }).await
     }
   }
 }
@@ -193,6 +206,9 @@ fn planner_message(turns: &[ChatTurn], context: &PlannerContext) -> String {
   }
   for name in &context.workflows {
     engines.push(format!("workflow \"{name}\""));
+  }
+  for editor in &context.editors {
+    engines.push(format!("editor app \"{}\" ({})", editor.id, editor.purpose));
   }
   let engines = if engines.is_empty() { "none".to_string() } else { engines.join(", ") };
 
@@ -291,11 +307,12 @@ mod tests {
       gemini_ready: true,
       comfy_ready: false,
       workflows: vec!["Wan video".into()],
+      editors: vec![ContextEditor { id: "photocraft".into(), purpose: "image editing".into() }],
       images: vec![ContextImage { path: "/p/a.png".into(), prompt: "a barn".into(), attached: true }],
     };
     let turns = vec![ChatTurn { role: "user".into(), text: "make it night".into() }];
     let msg = planner_message(&turns, &ctx);
-    assert!(msg.contains("Available engines: gemini, workflow \"Wan video\""));
+    assert!(msg.contains("Available engines: gemini, workflow \"Wan video\", editor app \"photocraft\" (image editing)"));
     assert!(msg.contains("- /p/a.png (attached by the person): a barn"));
     assert!(msg.contains("Person: make it night"));
   }

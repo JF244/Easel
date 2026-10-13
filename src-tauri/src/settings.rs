@@ -2,7 +2,9 @@
 //! stored there too: this is a personal, single-user app, so the file is
 //! readable only by you (0600 on Linux) and never leaves your PC.
 
+use crate::apps::AppPaths;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-2.5-flash-image";
@@ -20,8 +22,10 @@ pub struct Settings {
   pub gemini: GeminiSettings,
   pub comfy: ComfySettings,
   pub brain: BrainSettings,
-  /// Full path to PhotoCraft (or any editor) for "Open in editor".
+  /// Any other editor, for files no Craft app handles.
   pub editor_path: String,
+  /// Hand-set paths for the Craft apps, keyed by app id ("photocraft").
+  pub apps: HashMap<String, AppPaths>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +98,7 @@ impl Default for Settings {
       comfy: ComfySettings::default(),
       brain: BrainSettings::default(),
       editor_path: String::new(),
+      apps: HashMap::new(),
     }
   }
 }

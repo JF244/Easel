@@ -1,8 +1,10 @@
 import { useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useApp, type Page } from "./lib/store";
 import BrainPage from "./pages/BrainPage";
 import CreatePage from "./pages/CreatePage";
 import EditPage from "./pages/EditPage";
+import AppsPage from "./pages/AppsPage";
 import GalleryPage from "./pages/GalleryPage";
 import SettingsPage from "./pages/SettingsPage";
 
@@ -11,16 +13,31 @@ const NAV: { id: Page; label: string; hint: string }[] = [
   { id: "create", label: "Create", hint: "Write a prompt and generate images yourself" },
   { id: "edit", label: "Edit", hint: "Change an image, or paint an area to redo" },
   { id: "gallery", label: "Gallery", hint: "Everything you've made, saved on this PC" },
+  { id: "apps", label: "Apps", hint: "PhotoCraft and the other editors that replace the Adobe suite" },
   { id: "settings", label: "Settings", hint: "Keys, brains, ComfyUI and folders" },
 ];
 
 export default function App() {
-  const { page, setPage, loadSettings, refreshGallery, settingsError } = useApp();
+  const { page, setPage, loadSettings, refreshGallery, refreshApps, settingsError } = useApp();
 
   useEffect(() => {
     void loadSettings();
     void refreshGallery();
-  }, [loadSettings, refreshGallery]);
+    void refreshApps();
+  }, [loadSettings, refreshGallery, refreshApps]);
+
+  // Coming back from PhotoCraft (or any app) picks up what you saved there.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        void refreshGallery();
+        void refreshApps();
+      }
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [refreshGallery, refreshApps]);
 
   return (
     <div className="flex h-full">
@@ -53,6 +70,7 @@ export default function App() {
         {page === "create" && <CreatePage />}
         {page === "edit" && <EditPage />}
         {page === "gallery" && <GalleryPage />}
+        {page === "apps" && <AppsPage />}
         {page === "settings" && <SettingsPage />}
       </main>
     </div>

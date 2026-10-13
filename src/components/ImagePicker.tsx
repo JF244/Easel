@@ -61,7 +61,7 @@ export function ImagePicker({
       </div>
       {browsing && (
         <div className="mt-2 grid max-h-56 grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2 overflow-y-auto rounded-md border border-line p-2">
-          {gallery.filter((g) => !g.isVideo).length === 0 && <p className="col-span-full text-xs text-ink-3">Nothing in the gallery yet.</p>}
+          {gallery.filter((g) => g.kind === "image" && !g.path.toLowerCase().endsWith(".svg")).length === 0 && <p className="col-span-full text-xs text-ink-3">Nothing in the gallery yet.</p>}
           {gallery
             .filter((g) => !g.isVideo)
             .slice(0, 60)

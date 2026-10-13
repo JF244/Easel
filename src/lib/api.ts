@@ -9,9 +9,15 @@ export interface CustomWorkflow {
   json: string;
 }
 
+export interface AppPaths {
+  gui: string;
+  cli: string;
+}
+
 export interface Settings {
   outputDir: string;
   editorPath: string;
+  apps: Record<string, AppPaths>;
   gemini: { apiKey: string; imageModel: string };
   comfy: {
     url: string;
@@ -50,6 +56,7 @@ export interface GalleryItem {
   path: string;
   fileName: string;
   isVideo: boolean;
+  kind: "image" | "video" | "document";
   modifiedMs: number;
   meta: MediaMeta | null;
 }
@@ -78,12 +85,14 @@ export interface PlannerContext {
   geminiReady: boolean;
   comfyReady: boolean;
   workflows: string[];
+  editors: { id: string; purpose: string }[];
   images: { path: string; prompt: string; attached: boolean }[];
 }
 
 export interface PlannedJob {
   engine: string;
   workflow?: string | null;
+  app?: string | null;
   prompt: string;
   negative?: string | null;
   aspectRatio?: string | null;
@@ -102,6 +111,24 @@ export interface Improved {
   prompt: string;
   brain: string;
   skipped: string[];
+}
+
+export interface AppStatus {
+  id: string;
+  name: string;
+  replaces: string;
+  purpose: string;
+  extensions: string[];
+  releasesUrl: string;
+  /** Where it was found; null when not installed. */
+  gui: string | null;
+  /** Its command-line tool; the brain needs this to make edits. */
+  cli: string | null;
+}
+
+export interface EditorResult {
+  item: GalleryItem;
+  summary: string;
 }
 
 export const BRAIN_LABELS: Record<BrainKind, string> = {
@@ -127,6 +154,9 @@ export const api = {
   comfyCheckpoints: (url: string) => invoke<string[]>("comfy_checkpoints", { url }),
   localModels: (url: string) => invoke<string[]>("local_models", { url }),
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
+  appsStatus: () => invoke<AppStatus[]>("apps_status"),
+  openWithApp: (appId: string, path?: string) => invoke<void>("open_with_app", { appId, path: path ?? null }),
+  runEditorJob: (job: { app: string; instructions: string; inputPath?: string }) => invoke<EditorResult>("run_editor_job", { job }),
 };
 
 /** A URL the window can show for a file on disk. */
@@ -147,4 +177,14 @@ export function engineReady(settings: Settings | null, provider: ProviderId): st
   if (provider === "comfy" && !settings.comfy.checkpoint.trim()) return "Pick a ComfyUI checkpoint in Settings first.";
   if (provider === "comfyWorkflow" && settings.comfy.workflows.length === 0) return "Add a ComfyUI workflow in Settings first.";
   return null;
+}
+
+/** The Craft app that opens this file by default, if any. */
+export function appForPath(apps: AppStatus[], path: string): AppStatus | undefined {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return apps.find((a) => a.extensions.includes(ext));
+}
+
+export function extensionOf(path: string): string {
+  return (path.split(".").pop() ?? "").toUpperCase();
 }

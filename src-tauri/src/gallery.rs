@@ -5,8 +5,16 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const MEDIA_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "mp4", "webm"];
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm"];
+/// Pictures the window can show directly.
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "svg"];
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "mov", "mkv", "m4v"];
+/// Files the Craft apps make that need their app to view: layered images,
+/// raw photos, PDFs and layouts. They show as tiles that open in that app.
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+  "psd", "psb", "tif", "tiff", "kra", "ora", "ai", "eps", "pdf", "idml", "vectorcraft",
+  "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
+];
+
 
 /// What made an image: saved next to it as `<name>.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28,6 +36,8 @@ pub struct GalleryItem {
   pub path: String,
   pub file_name: String,
   pub is_video: bool,
+  /// "image", "video" or "document".
+  pub kind: &'static str,
   pub modified_ms: u64,
   pub meta: Option<MediaMeta>,
 }
@@ -77,11 +87,21 @@ pub fn delete(output_dir: &Path, path: &Path) -> Result<(), String> {
 }
 
 pub fn is_media(path: &Path) -> bool {
-  path
-    .extension()
-    .and_then(|e| e.to_str())
-    .map(|e| MEDIA_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-    .unwrap_or(false)
+  kind_of(path).is_some()
+}
+
+fn kind_of(path: &Path) -> Option<&'static str> {
+  let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+  let ext = ext.as_str();
+  if IMAGE_EXTENSIONS.contains(&ext) {
+    Some("image")
+  } else if VIDEO_EXTENSIONS.contains(&ext) {
+    Some("video")
+  } else if DOCUMENT_EXTENSIONS.contains(&ext) {
+    Some("document")
+  } else {
+    None
+  }
 }
 
 /// True when `path` resolves to somewhere under `dir` (after following `..` and links).
@@ -97,7 +117,8 @@ fn collect(dir: &Path, depth: u32, out: &mut Vec<GalleryItem>) {
   for entry in entries.flatten() {
     let path = entry.path();
     if path.is_dir() {
-      if depth < 1 {
+      let hidden = path.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with('.')).unwrap_or(true);
+      if depth < 1 && !hidden {
         collect(&path, depth + 1, out);
       }
     } else if is_media(&path) {
@@ -115,14 +136,15 @@ fn item_for(path: &Path) -> Option<GalleryItem> {
     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
     .map(|d| d.as_millis() as u64)
     .unwrap_or(0);
-  let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+  let kind = kind_of(path)?;
   let meta = std::fs::read_to_string(path.with_extension("json"))
     .ok()
     .and_then(|text| serde_json::from_str(&text).ok());
   Some(GalleryItem {
     path: path_string(path),
     file_name: path.file_name()?.to_string_lossy().into_owned(),
-    is_video: VIDEO_EXTENSIONS.contains(&ext.as_str()),
+    is_video: kind == "video",
+    kind,
     modified_ms,
     meta,
   })
@@ -130,7 +152,7 @@ fn item_for(path: &Path) -> Option<GalleryItem> {
 
 fn sanitize_extension(ext: &str) -> String {
   let ext = ext.trim_start_matches('.').to_ascii_lowercase();
-  if MEDIA_EXTENSIONS.contains(&ext.as_str()) { ext } else { "png".into() }
+  if kind_of(Path::new(&format!("x.{ext}"))).is_some() { ext } else { "png".into() }
 }
 
 fn path_string(path: &Path) -> String {
@@ -173,6 +195,18 @@ mod tests {
     assert!(outside.exists());
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(other);
+  }
+
+  #[test]
+  fn editor_files_are_listed_with_their_kind() {
+    let dir = temp_dir();
+    for name in ["a.psd", "b.svg", "c.mov", "d.txt", "e.json"] {
+      std::fs::write(dir.join(name), b"x").unwrap();
+    }
+    let mut kinds: Vec<(String, &str)> = list(&dir).into_iter().map(|i| (i.file_name, i.kind)).collect();
+    kinds.sort();
+    assert_eq!(kinds, vec![("a.psd".into(), "document"), ("b.svg".into(), "image"), ("c.mov".into(), "video")]);
+    let _ = std::fs::remove_dir_all(dir);
   }
 
   #[test]

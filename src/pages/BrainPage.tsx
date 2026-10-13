@@ -25,7 +25,7 @@ const RECENT_IMAGES = 10;
 let nextMessageId = 1;
 
 export default function BrainPage() {
-  const { settings, gallery, addToGallery, setPage } = useApp();
+  const { settings, gallery, apps, addToGallery, setPage } = useApp();
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
@@ -39,11 +39,14 @@ export default function BrainPage() {
 
   const buildContext = (): PlannerContext => {
     const prompts = new Map(gallery.map((g) => [g.path, g.meta?.prompt ?? ""]));
-    const recent = gallery.filter((g) => !g.isVideo && !attached.includes(g.path)).slice(0, RECENT_IMAGES);
+    const recent = gallery.filter((g) => g.kind === "image" && !attached.includes(g.path)).slice(0, RECENT_IMAGES);
+    // Editor jobs run through Claude Code, so only offer them when it's one of the brains.
+    const claudeCodeOn = settings?.brain.order.includes("claudeCli") ?? false;
     return {
       geminiReady: engineReady(settings, "gemini") === null,
       comfyReady: engineReady(settings, "comfy") === null,
       workflows: settings?.comfy.workflows.map((w) => w.name) ?? [],
+      editors: claudeCodeOn ? apps.filter((a) => a.cli).map((a) => ({ id: a.id, purpose: `${a.purpose}; replaces ${a.replaces}` })) : [],
       images: [
         ...attached.map((path) => ({ path, prompt: prompts.get(path) ?? "", attached: true })),
         ...recent.map((g) => ({ path: g.path, prompt: g.meta?.prompt ?? "", attached: false })),
@@ -53,6 +56,22 @@ export default function BrainPage() {
 
   /** Turns a planned job into a generate request, refusing paths the brain made up. */
   const runJob = async (job: PlannedJob, allowedPaths: Set<string>): Promise<JobRun> => {
+    const input = job.inputImage?.trim();
+    if (input && !allowedPaths.has(input)) {
+      return { job, status: "failed", results: [], error: "The brain pointed at an image that isn't in your gallery, so this job was skipped." };
+    }
+    if (job.engine === "editor") {
+      const app = apps.find((a) => a.id === job.app);
+      if (!app?.cli) return { job, status: "failed", results: [], error: `The editor "${job.app ?? ""}" isn't installed with its command-line tool. See the Apps page.` };
+      try {
+        const done = await api.runEditorJob({ app: app.id, instructions: job.prompt, inputPath: input || undefined });
+        addToGallery([done.item]);
+        return { job, status: "done", results: [done.item], error: undefined };
+      } catch (err) {
+        return { job, status: "failed", results: [], error: errorMessage(err) };
+      }
+    }
+
     let provider: ProviderId;
     let workflowId: string | undefined;
     if (job.engine === "gemini") provider = "gemini";
@@ -64,10 +83,6 @@ export default function BrainPage() {
       workflowId = wf.id;
     } else {
       return { job, status: "failed", results: [], error: `The brain asked for an engine Easel doesn't have ("${job.engine}").` };
-    }
-    const input = job.inputImage?.trim();
-    if (input && !allowedPaths.has(input)) {
-      return { job, status: "failed", results: [], error: "The brain pointed at an image that isn't in your gallery, so this job was skipped." };
     }
     try {
       const results = await api.generate({
@@ -157,8 +172,7 @@ export default function BrainPage() {
             {m.runs?.map((run, j) => (
               <div key={j} className="mt-3 space-y-2">
                 <p className="text-xs text-ink-3">
-                  {run.status === "running" ? "Making" : run.status === "done" ? "Made" : "Couldn't make"} with {run.job.engine}
-                  {run.job.workflow ? ` (${run.job.workflow})` : ""}: <span className="text-ink-2">{run.job.prompt}</span>
+                  {run.status === "running" ? "Making" : run.status === "done" ? "Made" : "Couldn't make"} with {engineName(run.job, apps)}: <span className="text-ink-2">{run.job.prompt}</span>
                 </p>
                 {run.status === "running" && <div className="h-1 w-40 animate-pulse rounded bg-accent/60" aria-label="Working" />}
                 {run.error && <ErrorNote message={run.error} />}
@@ -199,4 +213,11 @@ export default function BrainPage() {
       </div>
     </div>
   );
+}
+
+function engineName(job: PlannedJob, apps: { id: string; name: string }[]): string {
+  if (job.engine === "editor") return `${apps.find((a) => a.id === job.app)?.name ?? job.app ?? "an editor"} (Claude Code doing the edit)`;
+  if (job.engine === "workflow") return `your ComfyUI workflow "${job.workflow ?? ""}"`;
+  if (job.engine === "comfy") return "ComfyUI";
+  return "Gemini";
 }
