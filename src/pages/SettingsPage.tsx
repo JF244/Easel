@@ -186,7 +186,7 @@ function BrainOrder({ draft, list, onChange, emptyText }: { draft: Settings; lis
     <div className="space-y-2">
       <ol className="space-y-2">
         {list.map((kind, i) => (
-          <li key={kind} className="flex items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+          <li key={kind} className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
             <span className="w-5 text-ink-3">{i + 1}.</span>
             <span className="flex-1">{brainLabel(draft, kind)}</span>
             <button type="button" className="btn h-8 w-8 px-0" aria-label={`Move ${brainLabel(draft, kind)} up`} disabled={i === 0} onClick={() => move(i, -1)}>
@@ -195,6 +195,7 @@ function BrainOrder({ draft, list, onChange, emptyText }: { draft: Settings; lis
             <button type="button" className="btn h-8 w-8 px-0" aria-label={`Move ${brainLabel(draft, kind)} down`} disabled={i === list.length - 1} onClick={() => move(i, 1)}>
               ↓
             </button>
+            <BrainTestButton kind={kind} />
             <button type="button" className="btn h-8 text-xs" onClick={() => onChange(list.filter((k) => k !== kind))}>
               Turn off
             </button>
@@ -260,7 +261,7 @@ function BrainSection({ draft, update }: SectionProps) {
           label="Claude Code program"
           value={draft.brain.claudeCliPath}
           onChange={(v) => update((s) => (s.brain.claudeCliPath = v))}
-          hint="“claude” if it's on your PATH, or the full path to claude / claude.exe. Sign in once by running claude in a terminal."
+          hint="“claude” finds it on your PATH, including npm's claude.cmd. If you set a path, prefer the real claude.exe. Sign in once by running claude in a terminal. Exact edits in the Craft apps need Claude Code."
         />
         <TextField
           id="claude-cli-model"
@@ -275,7 +276,7 @@ function BrainSection({ draft, update }: SectionProps) {
           label="Antigravity program"
           value={draft.brain.agyCliPath}
           onChange={(v) => update((s) => (s.brain.agyCliPath = v))}
-          hint="“agy” if it's on your PATH, or its full path. Sign in once by running agy in a terminal."
+          hint="“agy” finds it on your PATH (an npm agy.cmd works too), or set the full path to agy.exe. Sign in once by running agy in a terminal."
         />
         <div>
           <TextField
@@ -317,6 +318,9 @@ function BrainSection({ draft, update }: SectionProps) {
           <TextField id="local-model" label="Local model" value={draft.brain.localModel} placeholder="Empty uses the first loaded model" onChange={(v) => update((s) => (s.brain.localModel = v))} />
           <div className="mt-2">
             <ListLoader label="Find loaded models" load={() => api.localModels(draft.brain.localUrl)} current={draft.brain.localModel} onPick={(v) => update((s) => (s.brain.localModel = v))} />
+          </div>
+          <div className="mt-2">
+            <ServerDetector onPick={(url) => update((s) => (s.brain.localUrl = url))} />
           </div>
         </div>
       </div>
@@ -529,5 +533,62 @@ function FoldersSection({ draft, update }: SectionProps) {
         </button>
       </div>
     </Section>
+  );
+}
+
+/** Runs one quick question through a single brain and shows how it went. */
+function BrainTestButton({ kind }: { kind: BrainKind }) {
+  const [state, setState] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    setState(null);
+    try {
+      setState({ ok: true, text: await api.brainTest(kind) });
+    } catch (err) {
+      setState({ ok: false, text: errorMessage(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button type="button" className="btn h-8 text-xs" disabled={busy} onClick={run} title="Uses your saved settings: save first if you just changed them">
+        {busy ? "Testing…" : "Test"}
+      </button>
+      {state && (
+        <span role="status" className={`basis-full text-xs ${state.ok ? "text-ok" : "text-danger"}`}>
+          {state.ok ? "Works: " : "Failed: "}
+          {state.text}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** Finds Ollama, LM Studio or llama-server running on this PC. */
+function ServerDetector({ onPick }: { onPick: (url: string) => void }) {
+  const [found, setFound] = useState<{ url: string; models: string[] }[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      setFound(await api.detectLocalServers());
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-1">
+      <button type="button" className="btn h-8 text-xs" disabled={busy} onClick={run}>
+        {busy ? "Looking…" : "Detect running servers"}
+      </button>
+      {found && found.length === 0 && <p className="text-xs text-danger">Nothing answered on 11434 (Ollama), 1234 (LM Studio) or 8080 (llama-server).</p>}
+      {found?.map((f) => (
+        <button key={f.url} type="button" className="block text-left text-xs text-ink-2 underline hover:text-ink" onClick={() => onPick(f.url)}>
+          Use {f.url} ({f.models.length} model{f.models.length === 1 ? "" : "s"})
+        </button>
+      ))}
+    </div>
   );
 }

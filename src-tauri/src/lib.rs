@@ -2,6 +2,8 @@ mod apps;
 mod brain;
 mod editor;
 mod gallery;
+mod launch;
+mod preflight;
 mod providers;
 mod settings;
 
@@ -156,6 +158,39 @@ async fn local_models(state: State<'_, AppState>, url: String, api_key: Option<S
   local_llm::list_models(&state.client, &url, api_key.as_deref().unwrap_or_default()).await
 }
 
+/// Warnings about this GPU and ComfyUI's PyTorch, checked before a ComfyUI job.
+#[tauri::command]
+async fn comfy_preflight(state: State<'_, AppState>) -> Result<preflight::Preflight, String> {
+  let comfy_url = state.settings().comfy.url;
+  let profile = hardware_profile_path();
+  Ok(preflight::check(&state.client, &comfy_url, profile.as_deref()).await)
+}
+
+/// Runs one quick question through a single brain and reports what happened.
+#[tauri::command]
+async fn brain_test(state: State<'_, AppState>, kind: settings::BrainKind) -> Result<String, String> {
+  brain::test(&state.client, &state.brain_settings(), &state.brain_dir, &kind).await
+}
+
+/// Where the setup's hardware detector writes its profile.
+fn hardware_profile_path() -> Option<PathBuf> {
+  let base = if cfg!(windows) {
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("EaselSuite"))
+  } else {
+    std::env::var_os("XDG_DATA_HOME")
+      .map(PathBuf::from)
+      .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+      .map(|d| d.join("easel-suite"))
+  };
+  base.map(|b| b.join("hardware-profile.json")).filter(|p| p.is_file())
+}
+
+/// Which local model servers (Ollama, LM Studio, llama-server) are running now.
+#[tauri::command]
+async fn detect_local_servers(state: State<'_, AppState>) -> Result<Vec<local_llm::LocalServer>, String> {
+  Ok(local_llm::detect_local_servers(&state.client).await)
+}
+
 #[tauri::command]
 async fn gemini_text_models(state: State<'_, AppState>, api_key: String) -> Result<Vec<String>, String> {
   gemini::list_text_models(&state.client, &api_key).await
@@ -286,6 +321,9 @@ pub fn run() {
       comfy_checkpoints,
       local_models,
       gemini_text_models,
+      detect_local_servers,
+      comfy_preflight,
+      brain_test,
       open_in_editor,
       apps_status,
       open_with_app,

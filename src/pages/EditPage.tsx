@@ -5,6 +5,7 @@ import { useApp } from "../lib/store";
 import { EngineSelect, type EngineChoice } from "../components/EngineSelect";
 import { BrainNote, ErrorNote } from "../components/ErrorNote";
 import { ResultGrid } from "../components/ResultGrid";
+import { ComfyPreflight } from "../components/ComfyPreflight";
 
 const PAINT_COLOR = "rgba(240, 90, 90, 1)";
 
@@ -238,6 +239,7 @@ export default function EditPage() {
               </div>
             </div>
 
+            <ComfyPreflight provider={engine.provider} />
             <button type="button" className="btn btn-primary w-full" disabled={!prompt.trim() || busy !== null || notReady !== null} onClick={generate}>
               {busy === "generate" ? "Working…" : hasMask ? "Redo the painted area" : "Apply the change"}
             </button>

@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-2.5-flash-image";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_COMFY_URL: &str = "http://127.0.0.1:8188";
-pub const DEFAULT_LOCAL_LLM_URL: &str = "http://127.0.0.1:1234";
+/// Ollama's port. If nothing answers there, Easel also tries LM Studio (1234) and llama-server (8080).
+pub const DEFAULT_LOCAL_LLM_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_CLAUDE_CLI: &str = "claude";
 pub const DEFAULT_AGY_CLI: &str = "agy";
 

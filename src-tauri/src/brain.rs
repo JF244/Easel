@@ -261,12 +261,20 @@ pub async fn improve(client: &reqwest::Client, settings: &BrainSettings, work_di
   Ok(Improved { prompt, brain, skipped })
 }
 
+/// A quick round trip through one brain, for the Test button in Settings.
+pub async fn test(client: &reqwest::Client, settings: &BrainSettings, work_dir: &Path, kind: &BrainKind) -> Result<String, String> {
+  let started = std::time::Instant::now();
+  let answer = ask(client, settings, work_dir, kind, "Reply with exactly one word.", "Say ready.").await?;
+  let first: String = clean_single_answer(&answer).chars().take(60).collect();
+  Ok(format!("{} answered \"{first}\" in {:.1}s", label(settings, kind), started.elapsed().as_secs_f32()))
+}
+
 /// Sends one question to one brain.
 async fn ask(client: &reqwest::Client, s: &BrainSettings, work_dir: &Path, kind: &BrainKind, system: &str, user: &str) -> Result<String, String> {
   match kind {
     BrainKind::ClaudeApi => claude::complete(client, &s.claude_api_key, &s.claude_api_model, system, user).await,
     BrainKind::Gemini => gemini::complete(client, &s.gemini_api_key, &s.gemini_model, system, user).await,
-    BrainKind::Local => local_llm::complete(client, &s.local_url, "", &s.local_model, system, user).await,
+    BrainKind::Local => local_llm::complete_local(client, &s.local_url, &s.local_model, system, user).await,
     BrainKind::Remote(id) => {
       let remote = s.remotes.iter().find(|r| &r.id == id).ok_or("this remote server was removed in Settings")?;
       local_llm::complete(client, &remote.url, &remote.api_key, &remote.model, system, user).await

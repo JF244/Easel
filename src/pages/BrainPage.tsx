@@ -54,6 +54,9 @@ let nextMessageId = initialHistory.reduce((max, m) => Math.max(max, m.id), 0) + 
 
 export default function BrainPage() {
   const { settings, gallery, apps, addToGallery, setPage } = useApp();
+  // Exact edits in the Craft apps run through Claude Code, whichever list it's in.
+  const claudeCodeAvailable = !!settings && (settings.brain.order.includes("claudeCli") || settings.brain.advisorOrder.includes("claudeCli"));
+  const editorsInstalled = apps.some((a) => a.cli);
   const [messages, setMessages] = useState<Message[]>(initialHistory);
   const [draft, setDraft] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
@@ -70,7 +73,7 @@ export default function BrainPage() {
     const prompts = new Map(gallery.map((g) => [g.path, g.meta?.prompt ?? ""]));
     const recent = gallery.filter((g) => g.kind === "image" && !attached.includes(g.path)).slice(0, RECENT_IMAGES);
     // Editor jobs run through Claude Code, so only offer them when it's one of the brains.
-    const claudeCodeOn = settings?.brain.order.includes("claudeCli") ?? false;
+    const claudeCodeOn = claudeCodeAvailable;
     return {
       geminiReady: engineReady(settings, "gemini") === null,
       comfyReady: engineReady(settings, "comfy") === null,
@@ -189,6 +192,14 @@ export default function BrainPage() {
         <p className="text-sm text-ink-2">
           Say what you want made. The brain writes the prompts, picks Gemini or ComfyUI, and runs the jobs. If one brain is out of usage, the next one in Settings takes over.
         </p>
+        {settings && editorsInstalled && !claudeCodeAvailable && (
+          <p className="mt-2 text-sm text-ink-2">
+            Exact edits in PhotoCraft and the other Craft apps need Claude Code as a brain or advisor. Other brains can still plan and write prompts.{" "}
+            <button type="button" className="underline" onClick={() => setPage("settings")}>
+              Add Claude Code
+            </button>
+          </p>
+        )}
         {settings && brainCount === 0 && (
           <p className="mt-2 text-sm text-danger">
             No brain is turned on.{" "}

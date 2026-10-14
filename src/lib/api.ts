@@ -143,6 +143,13 @@ export interface AppStatus {
   cli: string | null;
 }
 
+export interface Preflight {
+  warnings: string[];
+  device?: string | null;
+  torch?: string | null;
+  comfyVersion?: string | null;
+}
+
 export interface EditorResult {
   item: GalleryItem;
   summary: string;
@@ -185,6 +192,9 @@ export const api = {
   comfyCheckpoints: (url: string) => invoke<string[]>("comfy_checkpoints", { url }),
   localModels: (url: string, apiKey?: string) => invoke<string[]>("local_models", { url, apiKey: apiKey ?? null }),
   geminiTextModels: (apiKey: string) => invoke<string[]>("gemini_text_models", { apiKey }),
+  detectLocalServers: () => invoke<{ url: string; models: string[] }[]>("detect_local_servers"),
+  comfyPreflight: () => invoke<Preflight>("comfy_preflight"),
+  brainTest: (kind: BrainKind) => invoke<string>("brain_test", { kind }),
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
   appsStatus: () => invoke<AppStatus[]>("apps_status"),
   openWithApp: (appId: string, path?: string) => invoke<void>("open_with_app", { appId, path: path ?? null }),

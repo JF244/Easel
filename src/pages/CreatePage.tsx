@@ -5,6 +5,7 @@ import { EngineSelect, type EngineChoice } from "../components/EngineSelect";
 import { BrainNote, ErrorNote } from "../components/ErrorNote";
 import { ImagePicker } from "../components/ImagePicker";
 import { ResultGrid } from "../components/ResultGrid";
+import { ComfyPreflight } from "../components/ComfyPreflight";
 
 export default function CreatePage() {
   const { settings, addToGallery } = useApp();
@@ -125,6 +126,7 @@ export default function CreatePage() {
           <ImagePicker label="Reference images (optional, up to 3)" paths={references} onChange={setReferences} max={3} />
         )}
 
+        <ComfyPreflight provider={engine.provider} />
         <div className="flex items-center gap-3">
           <button type="button" className="btn btn-primary" disabled={!prompt.trim() || busy !== null || notReady !== null} onClick={generate}>
             {busy === "generate" ? "Generating…" : `Generate ${count > 1 ? `${count} images` : "image"}`}

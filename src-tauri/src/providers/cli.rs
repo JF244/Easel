@@ -5,6 +5,7 @@
 //! prompt can be read as a command. It runs in an empty scratch folder so the
 //! agent can't wander through your files, and it's stopped after a time limit.
 
+use crate::launch;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -33,8 +34,13 @@ pub async fn run(call: CliCall<'_>) -> Result<String, String> {
   }
   std::fs::create_dir_all(call.work_dir).map_err(|e| e.to_string())?;
 
-  let mut command = Command::new(program);
+  // npm installs on Windows put a .cmd wrapper on PATH; run what it wraps instead.
+  let resolved = launch::resolve(program).map_err(|e| {
+    format!("{} isn't installed or wasn't found ({e}); set its full path in Settings", call.label)
+  })?;
+  let mut command = Command::new(&resolved.program);
   command
+    .args(&resolved.prefix_args)
     .args(&call.options)
     .arg("-p")
     .arg(&call.prompt)

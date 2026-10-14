@@ -4,6 +4,73 @@
 
 use super::error_text;
 use serde_json::{json, Value};
+use std::time::Duration;
+
+/// Servers that usually run on this PC: Ollama, LM Studio, llama.cpp's llama-server.
+pub const KNOWN_LOCAL_SERVERS: &[&str] = &["http://127.0.0.1:11434", "http://127.0.0.1:1234", "http://127.0.0.1:8080"];
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// A model server found running on this PC.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalServer {
+  pub url: String,
+  pub models: Vec<String>,
+}
+
+/// The local brain: tries the saved address, and if nothing answers there and
+/// it's one of the usual local ports, tries the others. So "LM Studio's port"
+/// still works when it's Ollama that's running, and the other way round.
+pub async fn complete_local(client: &reqwest::Client, base_url: &str, model: &str, system: &str, user: &str) -> Result<String, String> {
+  match complete(client, base_url, "", model, system, user).await {
+    Err(err) if err.starts_with("couldn't reach") && is_known_local(base_url) => {
+      for other in KNOWN_LOCAL_SERVERS.iter().filter(|u| !same_server(u, base_url)) {
+        if let Ok(models) = probe(client, other).await {
+          // A model name from the saved server may not exist here; use this server's first model then.
+          let pick = if models.iter().any(|m| m == model.trim()) { model.to_string() } else { String::new() };
+          return complete(client, other, "", &pick, system, user).await;
+        }
+      }
+      Err(format!("{err}. Also checked {}, and none of them answered.", KNOWN_LOCAL_SERVERS.join(", ")))
+    }
+    other => other,
+  }
+}
+
+/// Which of the usual local servers are running right now, and their models.
+pub async fn detect_local_servers(client: &reqwest::Client) -> Vec<LocalServer> {
+  let mut found = Vec::new();
+  for url in KNOWN_LOCAL_SERVERS {
+    if let Ok(models) = probe(client, url).await {
+      found.push(LocalServer { url: url.to_string(), models });
+    }
+  }
+  found
+}
+
+async fn probe(client: &reqwest::Client, base: &str) -> Result<Vec<String>, String> {
+  let resp = client.get(endpoint(base, "models")).timeout(PROBE_TIMEOUT).send().await.map_err(|e| e.to_string())?;
+  if !resp.status().is_success() {
+    return Err(resp.status().to_string());
+  }
+  let value: Value = resp.json().await.map_err(|e| e.to_string())?;
+  Ok(model_ids(&value))
+}
+
+fn is_known_local(url: &str) -> bool {
+  KNOWN_LOCAL_SERVERS.iter().any(|u| same_server(u, url))
+}
+
+/// "localhost:1234", "http://127.0.0.1:1234/" and "http://localhost:1234/v1" are the same server.
+fn same_server(a: &str, b: &str) -> bool {
+  normalize(a) == normalize(b)
+}
+
+fn normalize(url: &str) -> String {
+  let u = url.trim().trim_end_matches('/').trim_end_matches("/v1").to_ascii_lowercase();
+  let u = u.strip_prefix("http://").or_else(|| u.strip_prefix("https://")).unwrap_or(&u).to_string();
+  u.replace("localhost", "127.0.0.1")
+}
 
 pub async fn complete(client: &reqwest::Client, base_url: &str, api_key: &str, model: &str, system: &str, user: &str) -> Result<String, String> {
   let base = base_url.trim().trim_end_matches('/');
@@ -111,8 +178,49 @@ mod tests {
   }
 
   #[test]
+  fn recognises_the_usual_local_ports_however_they_are_written() {
+    assert!(is_known_local("http://localhost:1234/"));
+    assert!(is_known_local("127.0.0.1:11434"));
+    assert!(is_known_local("http://127.0.0.1:8080/v1"));
+    assert!(!is_known_local("http://192.168.1.20:11434"));
+  }
+
+  #[tokio::test]
+  async fn falls_back_to_whichever_local_server_is_running() {
+    // Nothing listens on the saved address; the "other" server answers.
+    let live = stand_in_server();
+    let client = reqwest::Client::new();
+    let models = probe(&client, &live).await.unwrap();
+    assert_eq!(models, vec!["qwen3:8b"]);
+    let answer = complete(&client, &live, "", "", "sys", "hi").await.unwrap();
+    assert_eq!(answer, "hello from the stand-in");
+  }
+
+  #[test]
   fn reads_model_ids() {
     let v = json!({ "data": [{ "id": "qwen3-30b-a3b" }, { "id": "gpt-oss-20b" }] });
     assert_eq!(model_ids(&v), vec!["qwen3-30b-a3b", "gpt-oss-20b"]);
+  }
+
+  /// Serves /v1/models and /v1/chat/completions, like Ollama does.
+  fn stand_in_server() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+      for mut stream in listener.incoming().flatten() {
+        let mut buf = [0u8; 16384];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let head = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = if head.starts_with("GET") {
+          json!({ "data": [{ "id": "qwen3:8b" }] })
+        } else {
+          json!({ "choices": [{ "message": { "content": "hello from the stand-in" } }] })
+        }
+        .to_string();
+        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+      }
+    });
+    format!("http://{addr}")
   }
 }
