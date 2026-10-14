@@ -64,6 +64,32 @@ npm run tauri build      # build an installable AppImage / .rpm in src-tauri/tar
 If the window is blank on Wayland with an AMD card, start it with
 `WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev`.
 
+## One-click setup on a new Windows PC
+
+Download **Easel-Windows-Setup** from the latest run under **Actions**
+(Artifacts), unzip it, and double-click **Setup Easel.cmd**. It looks at the PC
+first, shows the plan with download sizes, and asks before changing anything:
+
+| Piece                 | What it picks                                                                                  |
+|-----------------------|------------------------------------------------------------------------------------------------|
+| Easel                 | Installs it from the installer in the same folder                                              |
+| Craft apps            | All seven, latest Windows release of each, from their GitHub pages                             |
+| ComfyUI               | NVIDIA build for GeForce/RTX, AMD build for Radeon RX 7000/9000, otherwise the CPU build        |
+| Image model           | FLUX.1 schnell for 16 GB+ graphics memory, SDXL for 8 GB+, SD 1.5 for 4 GB+                    |
+| Local brain (Ollama)  | gpt-oss 20B for 16 GB+, Qwen3 14B for 10 GB+, Qwen3 8B for 6 GB+, otherwise Qwen3 4B            |
+| Claude Code           | Plus Git for Windows, which it needs; you sign in once at the end                              |
+| Easel settings        | Points Easel at all of it: local brain first, Claude Code as fallback and advisor              |
+
+ComfyUI also gets a **Start ComfyUI** desktop shortcut and starts minimized at
+sign-in (`-NoAutostart` turns that off). Running the setup again only installs
+what's missing, and existing Easel settings and keys are kept. Other options:
+`-DryRun` (just show the plan), `-DryRun -CheckLinks` (also test every
+download), `-InstallDir D:\Easel`, `-SkipModels`, `-SkipApps`, `-SkipComfy`,
+`-SkipLocalBrain`, `-SkipClaude`. The log is in `%LOCALAPPDATA%\EaselSuite\setup.log`.
+
+Every push tests the setup on a clean Windows machine: a link check plus a real
+install of Easel, the Craft apps, ComfyUI and Claude Code.
+
 ## Run it on Windows
 
 Install [Rust](https://rustup.rs), [Node.js 22 LTS](https://nodejs.org) and
