@@ -155,13 +155,34 @@ function Find-ReleaseAsset([string]$Repo, [string[]]$Patterns) {
   if (-not $env:EASEL_SKIP_GITHUB_API) {
     $headers = @{ "User-Agent" = "Easel-Setup"; "Accept" = "application/vnd.github+json" }
     if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
-    try { $candidates = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=20" -Headers $headers -TimeoutSec 60) | Where-Object { -not $_.draft } }
-    catch { Say "   (GitHub's API said no for $Repo; reading its release page instead)" "DarkGray" }
+    try { $candidates = @(@(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=20" -Headers $headers -TimeoutSec 60) | Where-Object { -not $_.draft }) }
+    catch { Say "   (GitHub's API said no for $Repo; reading its release pages instead)" "DarkGray" }
   }
-  if ($candidates.Count -eq 0) { $candidates = @(Get-Release $Repo) }
   foreach ($release in $candidates) {
     $asset = Find-Asset $release $Patterns
     if ($asset) { return [pscustomobject]@{ Release = $release; Asset = $asset } }
+  }
+  if ($candidates.Count -eq 0) {
+    # No API: the public releases page lists the newest tags; open each one's downloads.
+    $tags = @()
+    try {
+      $html = (Invoke-WebRequest -Uri "https://github.com/$Repo/releases" -UseBasicParsing -TimeoutSec 60 -Headers @{ "User-Agent" = "Easel-Setup" }).Content
+      foreach ($m in [Regex]::Matches($html, '/' + [Regex]::Escape($Repo) + '/releases/tag/([^"/?#]+)', "IgnoreCase")) {
+        $t = [Uri]::UnescapeDataString($m.Groups[1].Value)
+        if ($tags -notcontains $t) { $tags += $t }
+      }
+    } catch { }
+    if ($tags.Count -eq 0) { $candidates = @(Get-Release $Repo) }
+    foreach ($t in ($tags | Select-Object -First 10)) {
+      try { $release = Get-ReleaseFromPage $Repo $t } catch { continue }
+      $candidates += $release
+      $asset = Find-Asset $release $Patterns
+      if ($asset) { return [pscustomobject]@{ Release = $release; Asset = $asset } }
+    }
+    foreach ($release in $candidates) {
+      $asset = Find-Asset $release $Patterns
+      if ($asset) { return [pscustomobject]@{ Release = $release; Asset = $asset } }
+    }
   }
   $names = @($candidates | Select-Object -First 1 | ForEach-Object { $_.assets } | ForEach-Object { $_.name }) -join ", "
   throw "no release of $Repo has a matching download. The newest one has: $names"
