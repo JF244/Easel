@@ -100,6 +100,8 @@ jobs:
           if (-not $settings.apps.photocraft.gui -or -not (Test-Path $settings.apps.photocraft.gui)) { throw "PhotoCraft not installed or not in settings" }
           if (-not (Get-ChildItem "$env:LOCALAPPDATA\EaselSuite\ComfyUI" -Filter run_cpu.bat -Recurse -Depth 2)) { throw "ComfyUI not unpacked" }
           if (-not ($settings.brain.order -contains "claudeCli")) { throw "Claude Code not set as a brain" }
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if (($userPath -split ";") -notcontains "$env:USERPROFILE\.local\bin") { throw "Claude Code's folder isn't on the user PATH" }
           $easel = @("$env:LOCALAPPDATA\Easel\easel.exe", "$env:LOCALAPPDATA\Programs\Easel\easel.exe", "$env:ProgramFiles\Easel\easel.exe") | Where-Object { Test-Path $_ }
           if (-not $easel) { throw "Easel not installed" }
           $settings | ConvertTo-Json -Depth 10 | Write-Host

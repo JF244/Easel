@@ -527,6 +527,12 @@ Invoke-Step "claude" {
   # Claude Code's official Windows installer, run in a fresh PowerShell.
   $p = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm $ClaudeInstallUrl | iex") -Wait -PassThru -NoNewWindow
   if ($p.ExitCode -ne 0) { throw "the Claude Code installer exited with code $($p.ExitCode)" }
+  # The installer leaves ~/.local/bin off PATH, so `claude` wouldn't work in a terminal.
+  $bin = Join-Path $env:USERPROFILE ".local\bin"
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if (($userPath -split ";") -notcontains $bin) {
+    [Environment]::SetEnvironmentVariable("Path", (($userPath.TrimEnd(";"), $bin) -join ";").TrimStart(";"), "User")
+  }
   Update-Path
   $script:claudeExe = Get-ClaudeExe
   if (-not $script:claudeExe) { throw "Claude Code installed but claude.exe wasn't found" }
