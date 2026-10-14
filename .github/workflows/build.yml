@@ -100,6 +100,15 @@ jobs:
       - name: Setup dry run and link check (Windows PowerShell 5.1)
         if: matrix.name == 'windows'
         shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -DryRun -CheckLinks
+
+      - name: Link check without GitHub's API (the fallback home users may need)
+        if: matrix.name == 'windows'
+        shell: powershell
+        env:
+          EASEL_SKIP_GITHUB_API: "1"
         run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -DryRun -CheckLinks
 
       - name: Test machines as fact files
@@ -113,6 +122,8 @@ jobs:
       - name: Real install as the GTX 1080 (pinned ComfyUI + PyTorch 2.6.0+cu124)
         if: matrix.name == 'windows'
         shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -Yes -FactsFile pascal.json -SkipModels -SkipLocalBrain -NoAutostart -NoLaunch
 
       - name: Check the GTX 1080 install
@@ -139,6 +150,8 @@ jobs:
       - name: Real install as the AMD Windows PC (llama.cpp Vulkan)
         if: matrix.name == 'windows'
         shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -Yes -FactsFile amd-windows.json -SkipApps -SkipClaude -SkipModels -NoAutostart -NoLaunch -InstallDir "$env:RUNNER_TEMP\amd-suite"
 
       - name: Check the AMD install

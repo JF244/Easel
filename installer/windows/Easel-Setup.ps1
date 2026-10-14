@@ -100,10 +100,51 @@ function Test-Admin {
   (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# GitHub's API allows only 60 anonymous requests an hour per IP address, and
+# shared connections run out. So: use a token when one is set (CI has one),
+# and when the API refuses, read the release's public download page instead.
+$script:ReleaseCache = @{}
 function Get-Release([string]$Repo, [string]$Tag = "") {
-  $headers = @{ "User-Agent" = "Easel-Setup"; "Accept" = "application/vnd.github+json" }
-  $path = if ($Tag) { "releases/tags/$Tag" } else { "releases/latest" }
-  Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/$path" -Headers $headers -TimeoutSec 60
+  $key = "$Repo@$Tag"
+  if ($script:ReleaseCache.ContainsKey($key)) { return $script:ReleaseCache[$key] }
+  $release = $null
+  if (-not $env:EASEL_SKIP_GITHUB_API) {
+    $headers = @{ "User-Agent" = "Easel-Setup"; "Accept" = "application/vnd.github+json" }
+    if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
+    $path = if ($Tag) { "releases/tags/$Tag" } else { "releases/latest" }
+    try { $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/$path" -Headers $headers -TimeoutSec 60 }
+    catch { Say "   (GitHub's API said no for $Repo; reading its release page instead)" "DarkGray" }
+  }
+  if (-not $release) { $release = Get-ReleaseFromPage $Repo $Tag }
+  $script:ReleaseCache[$key] = $release
+  return $release
+}
+
+# The same information from github.com's pages, which aren't rate limited like the API.
+function Get-ReleaseFromPage([string]$Repo, [string]$Tag) {
+  if (-not $Tag) {
+    # /releases/latest redirects to /releases/tag/<tag>.
+    $request = [Net.HttpWebRequest]::Create("https://github.com/$Repo/releases/latest")
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = "Easel-Setup"
+    $response = $request.GetResponse()
+    $location = $response.Headers["Location"]
+    $response.Close()
+    if (-not $location -or $location -notmatch "/releases/tag/([^/?#]+)") { throw "couldn't find the latest release of $Repo" }
+    $Tag = [Uri]::UnescapeDataString($Matches[1])
+  }
+  $html = (Invoke-WebRequest -Uri "https://github.com/$Repo/releases/expanded_assets/$Tag" -UseBasicParsing -TimeoutSec 60 -Headers @{ "User-Agent" = "Easel-Setup" }).Content
+  $assets = @()
+  $pattern = 'href="(/' + [Regex]::Escape($Repo) + '/releases/download/[^"]+)"'
+  foreach ($m in [Regex]::Matches($html, $pattern, "IgnoreCase")) {
+    $href = $m.Groups[1].Value
+    $name = [Uri]::UnescapeDataString(($href -split "/")[-1])
+    if (-not ($assets | Where-Object { $_.name -eq $name })) {
+      $assets += [pscustomobject]@{ name = $name; browser_download_url = "https://github.com$href" }
+    }
+  }
+  if ($assets.Count -eq 0) { throw "the $Repo $Tag release page lists no downloads" }
+  [pscustomobject]@{ tag_name = $Tag; assets = $assets }
 }
 
 function Find-Asset($Release, [string[]]$Patterns) {
