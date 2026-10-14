@@ -147,6 +147,26 @@ function Get-ReleaseFromPage([string]$Repo, [string]$Tag) {
   [pscustomobject]@{ tag_name = $Tag; assets = $assets }
 }
 
+# The newest release (looking back through recent ones) that has a matching
+# file. llama.cpp's "latest" release doesn't always carry every build, so
+# trusting it alone breaks installs.
+function Find-ReleaseAsset([string]$Repo, [string[]]$Patterns) {
+  $candidates = @()
+  if (-not $env:EASEL_SKIP_GITHUB_API) {
+    $headers = @{ "User-Agent" = "Easel-Setup"; "Accept" = "application/vnd.github+json" }
+    if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
+    try { $candidates = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=20" -Headers $headers -TimeoutSec 60) | Where-Object { -not $_.draft } }
+    catch { Say "   (GitHub's API said no for $Repo; reading its release page instead)" "DarkGray" }
+  }
+  if ($candidates.Count -eq 0) { $candidates = @(Get-Release $Repo) }
+  foreach ($release in $candidates) {
+    $asset = Find-Asset $release $Patterns
+    if ($asset) { return [pscustomobject]@{ Release = $release; Asset = $asset } }
+  }
+  $names = @($candidates | Select-Object -First 1 | ForEach-Object { $_.assets } | ForEach-Object { $_.name }) -join ", "
+  throw "no release of $Repo has a matching download. The newest one has: $names"
+}
+
 function Find-Asset($Release, [string[]]$Patterns) {
   foreach ($pattern in $Patterns) {
     $match = $Release.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
@@ -302,6 +322,9 @@ if ($FactsFile) {
 }
 $hw = Resolve-EaselProfile $facts $catalog
 $arch = if ($facts.arch) { $facts.arch } else { "x64" }
+# llama.cpp has named this build "llama-bNNNN-bin-win-vulkan-x64.zip"; match loosely in case that shifts.
+$archWord = if ($arch -eq "arm64") { "arm64" } else { "(x64|amd64|x86_64)" }
+$LlamaVulkanPatterns = @("bin-win-vulkan-$archWord\.zip$", "win.*vulkan.*$archWord.*\.zip$", "vulkan.*win.*$archWord.*\.zip$")
 
 Say "   Memory:   $($facts.ramGB) GB, $($facts.cpuName)"
 Say "   Disk:     $($facts.freeGB) GB free (install folder $InstallDir)"
@@ -405,10 +428,9 @@ if ($DryRun) {
       } catch { & $check "ComfyUI release '$tag': $($_.Exception.Message)" $false }
     }
     try {
-      $rel = Get-Release $LlamaCppRepo
-      $asset = Find-Asset $rel @("bin-win-vulkan-$arch\.zip$")
-      & $check "llama.cpp $($rel.tag_name) Vulkan build: $(if ($asset) { $asset.name } else { 'missing' })" ([bool]$asset)
-    } catch { & $check "llama.cpp releases: $($_.Exception.Message)" $false }
+      $found = Find-ReleaseAsset $LlamaCppRepo $LlamaVulkanPatterns
+      & $check "llama.cpp $($found.Release.tag_name) Vulkan build: $($found.Asset.name)" $true
+    } catch { & $check "llama.cpp Vulkan build: $($_.Exception.Message)" $false }
     foreach ($c in $catalog.checkpoints.PSObject.Properties) { & $check "$($c.Value.name): $($c.Value.url)" (Test-Url $c.Value.url) }
     foreach ($l in $catalog.llms.PSObject.Properties) { & $check "$($l.Name) GGUF: $($l.Value.ggufUrl)" (Test-Url $l.Value.ggufUrl) }
     & $check "PyTorch $($catalog.legacyNvidia.torch) index" (Test-Url ($catalog.legacyNvidia.torchIndex.TrimEnd("/") + "/torch/"))
@@ -536,9 +558,9 @@ Invoke-Step "brainmodel" {
 }
 
 Invoke-Step "llamacpp" {
-  $rel = Get-Release $LlamaCppRepo
-  $asset = Find-Asset $rel @("bin-win-vulkan-$arch\.zip$")
-  if (-not $asset) { throw "llama.cpp $($rel.tag_name) has no Vulkan build for Windows $arch" }
+  $found = Find-ReleaseAsset $LlamaCppRepo $LlamaVulkanPatterns
+  $asset = $found.Asset
+  Say "   llama.cpp $($found.Release.tag_name): $($asset.name)"
   $zip = Join-Path $downloads $asset.name
   Get-File $asset.browser_download_url $zip
   New-Item -ItemType Directory -Force -Path $llamaDir | Out-Null
