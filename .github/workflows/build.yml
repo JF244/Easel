@@ -60,6 +60,12 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: warn
 
+      - name: Hardware resolver cases (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          python3 installer/linux/resolve_profile.py --test
+          python3 installer/linux/detect_hardware.py > /dev/null
+
       # Windows: bundle the all-in-one setup next to the Easel installer, then
       # prove it works on a clean Windows machine.
       - name: Package the Windows setup
@@ -69,28 +75,47 @@ jobs:
           $out = "easel-windows-setup"
           New-Item -ItemType Directory -Force $out | Out-Null
           Copy-Item src-tauri/target/release/bundle/nsis/*.exe $out
-          Copy-Item windows-setup/* $out
+          Copy-Item installer/windows/* $out
+          Copy-Item installer/catalog.json, installer/profile-cases.json $out
 
-      - name: Lint the setup script
+      - name: Lint the setup scripts
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
-          $issues = Invoke-ScriptAnalyzer -Path windows-setup/Easel-Setup.ps1 -Severity Error
+          $issues = Invoke-ScriptAnalyzer -Path installer/windows -Recurse -Severity Error
           $issues | Format-Table -AutoSize | Out-String | Write-Host
           if ($issues) { exit 1 }
+
+      - name: Hardware resolver cases (Windows PowerShell 5.1)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/detect-hardware.ps1 -Test
+
+      - name: Detect this runner's hardware
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/detect-hardware.ps1
 
       - name: Setup dry run and link check (Windows PowerShell 5.1)
         if: matrix.name == 'windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -DryRun -CheckLinks
 
-      - name: Setup real install (no big models)
+      - name: Test machines as fact files
         if: matrix.name == 'windows'
         shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -Yes -SkipModels -SkipLocalBrain -NoAutostart -NoLaunch
+        run: |
+          $cases = (Get-Content installer/profile-cases.json -Raw | ConvertFrom-Json).cases
+          $cases[0].facts | ConvertTo-Json -Depth 10 | Set-Content -Encoding ascii pascal.json
+          $cases[6].facts | ConvertTo-Json -Depth 10 | Set-Content -Encoding ascii amd-windows.json
 
-      - name: Check what the setup installed
+      - name: Real install as the GTX 1080 (pinned ComfyUI + PyTorch 2.6.0+cu124)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -Yes -FactsFile pascal.json -SkipModels -SkipLocalBrain -NoAutostart -NoLaunch
+
+      - name: Check the GTX 1080 install
         if: matrix.name == 'windows'
         shell: powershell
         run: |
@@ -98,14 +123,33 @@ jobs:
           $settings = Get-Content "$env:APPDATA\app.easel.studio\settings.json" -Raw | ConvertFrom-Json
           if ($settings.comfy.url -ne "http://127.0.0.1:8188") { throw "ComfyUI address not set" }
           if (-not $settings.apps.photocraft.gui -or -not (Test-Path $settings.apps.photocraft.gui)) { throw "PhotoCraft not installed or not in settings" }
-          if (-not (Get-ChildItem "$env:LOCALAPPDATA\EaselSuite\ComfyUI" -Filter run_cpu.bat -Recurse -Depth 2)) { throw "ComfyUI not unpacked" }
           if (-not ($settings.brain.order -contains "claudeCli")) { throw "Claude Code not set as a brain" }
           $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
           if (($userPath -split ";") -notcontains "$env:USERPROFILE\.local\bin") { throw "Claude Code's folder isn't on the user PATH" }
+          $python = Get-ChildItem "$env:LOCALAPPDATA\EaselSuite\ComfyUI" -Filter python.exe -Recurse -Depth 3 | Where-Object { $_.DirectoryName -like "*python_embeded" } | Select-Object -First 1
+          if (-not $python) { throw "ComfyUI's python_embeded not found" }
+          $torch = (& $python.FullName -c "import torch; print(torch.__version__)").Trim()
+          if ($torch -ne "2.6.0+cu124") { throw "PyTorch is $torch, expected 2.6.0+cu124" }
+          $hw = Get-Content "$env:LOCALAPPDATA\EaselSuite\hardware-profile.json" -Raw | ConvertFrom-Json
+          if ($hw.summary.gpuBackend -ne "cuda-legacy" -or $hw.summary.computeCap -ne 6.1) { throw "hardware profile wrong: $($hw.summary | ConvertTo-Json)" }
           $easel = @("$env:LOCALAPPDATA\Easel\easel.exe", "$env:LOCALAPPDATA\Programs\Easel\easel.exe", "$env:ProgramFiles\Easel\easel.exe") | Where-Object { Test-Path $_ }
           if (-not $easel) { throw "Easel not installed" }
-          $settings | ConvertTo-Json -Depth 10 | Write-Host
-          Write-Host "Setup installed everything it should."
+          Write-Host "GTX 1080 install: PyTorch $torch in ComfyUI, settings and profile correct."
+
+      - name: Real install as the AMD Windows PC (llama.cpp Vulkan)
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File easel-windows-setup/Easel-Setup.ps1 -Yes -FactsFile amd-windows.json -SkipApps -SkipClaude -SkipModels -NoAutostart -NoLaunch -InstallDir "$env:RUNNER_TEMP\amd-suite"
+
+      - name: Check the AMD install
+        if: matrix.name == 'windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $server = "$env:RUNNER_TEMP\amd-suite\llama.cpp\llama-server.exe"
+          if (-not (Test-Path $server)) { throw "llama-server.exe not installed" }
+          & $server --version 2>&1 | Select-Object -First 3 | Write-Host
+          Write-Host "AMD Windows install: llama.cpp Vulkan build is in place."
 
       - uses: actions/upload-artifact@v4
         if: matrix.name == 'windows'

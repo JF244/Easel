@@ -1,0 +1,37 @@
+{
+  "comment": "One source for model choices and download links, read by both the Windows and Linux resolvers. CI checks every URL.",
+  "legacyNvidia": {
+    "comfyTag": "v0.7.0",
+    "torch": "2.6.0+cu124",
+    "pipPackages": ["torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0"],
+    "torchIndex": "https://download.pytorch.org/whl/cu124",
+    "why": "PyTorch builds newer than 2.6 dropped Pascal and older (compute < 7.5), and ComfyUI releases after 2026-01-05 need comfy_kitchen, which needs PyTorch 2.12+."
+  },
+  "checkpoints": {
+    "flux-schnell": {
+      "name": "FLUX.1 schnell (fp8)", "file": "flux1-schnell-fp8.safetensors", "sizeGB": 17.2,
+      "url": "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors",
+      "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple", "baseSize": 1024, "negative": ""
+    },
+    "sdxl": {
+      "name": "Stable Diffusion XL base", "file": "sd_xl_base_1.0.safetensors", "sizeGB": 6.9,
+      "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+      "steps": 28, "cfg": 6.0, "sampler": "euler", "scheduler": "normal", "baseSize": 1024, "negative": "blurry, low quality, watermark, text artifacts"
+    },
+    "dreamshaper-sd15": {
+      "name": "DreamShaper 8 (SD 1.5)", "file": "DreamShaper_8_pruned.safetensors", "sizeGB": 2.1,
+      "url": "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors",
+      "steps": 25, "cfg": 7.0, "sampler": "dpmpp_2m", "scheduler": "karras", "baseSize": 512, "negative": "blurry, low quality, watermark, text artifacts"
+    }
+  },
+  "llms": {
+    "qwen3:30b-a3b": { "sizeGB": 18.6, "ggufUrl": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf" },
+    "qwen3:8b": { "sizeGB": 5.2, "ggufUrl": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" },
+    "qwen3:4b": { "sizeGB": 2.6, "ggufUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf" }
+  },
+  "servers": {
+    "ollama": "http://127.0.0.1:11434",
+    "lmstudio": "http://127.0.0.1:1234",
+    "llamaServer": "http://127.0.0.1:8080"
+  }
+}

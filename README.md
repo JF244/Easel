@@ -70,15 +70,13 @@ Download **Easel-Windows-Setup** from the latest run under **Actions**
 (Artifacts), unzip it, and double-click **Setup Easel.cmd**. It looks at the PC
 first, shows the plan with download sizes, and asks before changing anything:
 
-| Piece                 | What it picks                                                                                  |
-|-----------------------|------------------------------------------------------------------------------------------------|
-| Easel                 | Installs it from the installer in the same folder                                              |
-| Craft apps            | All seven, latest Windows release of each, from their GitHub pages                             |
-| ComfyUI               | NVIDIA build for GeForce/RTX, AMD build for Radeon RX 7000/9000, otherwise the CPU build        |
-| Image model           | FLUX.1 schnell for 16 GB+ graphics memory, SDXL for 8 GB+, SD 1.5 for 4 GB+                    |
-| Local brain (Ollama)  | gpt-oss 20B for 16 GB+, Qwen3 14B for 10 GB+, Qwen3 8B for 6 GB+, otherwise Qwen3 4B            |
-| Claude Code           | Plus Git for Windows, which it needs; you sign in once at the end                              |
-| Easel settings        | Points Easel at all of it: local brain first, Claude Code as fallback and advisor              |
+It detects the hardware, resolves it into a profile and installs from that:
+Easel, the seven Craft apps, ComfyUI sized and pinned for the graphics card
+(Pascal cards get ComfyUI v0.7.0 with PyTorch 2.6.0+cu124), a checkpoint and a
+local brain model that fit, Git and Claude Code; on AMD + Windows it uses
+Gemini for images and llama.cpp (Vulkan) for the local brain. Then it writes
+Easel's settings. The full decision matrix, and how to try the detector on a
+PC first, is in [installer/README.md](installer/README.md).
 
 ComfyUI also gets a **Start ComfyUI** desktop shortcut and starts minimized at
 sign-in (`-NoAutostart` turns that off). Running the setup again only installs

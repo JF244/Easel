@@ -1,0 +1,69 @@
+{
+  "comment": "Test machines and what the resolver must decide for each. Both installer/windows/EaselProfile.ps1 and installer/linux/resolve_profile.py must pass every case. Only the listed fields are checked.",
+  "cases": [
+    {
+      "name": "GTX 1080 8 GB on Windows (the Pascal test run)",
+      "facts": { "os": "windows", "ramGB": 16, "freeGB": 400, "gpus": [{ "name": "NVIDIA GeForce GTX 1080", "vendor": "nvidia", "vramGB": 8, "computeCap": 6.1 }] },
+      "expect": {
+        "gpuBackend": "cuda-legacy", "imageEngine": "comfy",
+        "comfy.pinTag": "v0.7.0", "comfy.torch": "2.6.0+cu124", "comfy.torchIndex": "https://download.pytorch.org/whl/cu124",
+        "checkpoint.id": "dreamshaper-sd15", "checkpoint.baseSize": 512,
+        "llm.runtime": "ollama", "llm.model": "qwen3:8b", "llm.contextLength": 8192, "llm.url": "http://127.0.0.1:11434"
+      }
+    },
+    {
+      "name": "GTX 1080 Ti 11 GB, compute capability unknown (guessed from the name)",
+      "facts": { "os": "windows", "ramGB": 32, "freeGB": 400, "gpus": [{ "name": "NVIDIA GeForce GTX 1080 Ti", "vendor": "nvidia", "vramGB": 11, "computeCap": null }] },
+      "expect": { "gpuBackend": "cuda-legacy", "comfy.pinTag": "v0.7.0", "checkpoint.id": "sdxl", "llm.model": "qwen3:8b", "summary.computeCap": 6.1 }
+    },
+    {
+      "name": "RTX 4070 12 GB, 32 GB RAM",
+      "facts": { "os": "windows", "ramGB": 32, "freeGB": 500, "gpus": [{ "name": "NVIDIA GeForce RTX 4070", "vendor": "nvidia", "vramGB": 12, "computeCap": 8.9 }] },
+      "expect": { "gpuBackend": "cuda", "comfy.pinTag": null, "comfy.torch": "bundled", "checkpoint.id": "sdxl", "checkpoint.baseSize": 1024, "llm.model": "qwen3:30b-a3b", "llm.contextLength": 16384 }
+    },
+    {
+      "name": "RTX 3060 12 GB, only 16 GB RAM (no room to spill a MoE model)",
+      "facts": { "os": "windows", "ramGB": 16, "freeGB": 500, "gpus": [{ "name": "NVIDIA GeForce RTX 3060", "vendor": "nvidia", "vramGB": 12, "computeCap": 8.6 }] },
+      "expect": { "gpuBackend": "cuda", "checkpoint.id": "sdxl", "llm.model": "qwen3:8b", "llm.contextLength": 16384 }
+    },
+    {
+      "name": "RTX 4090 24 GB",
+      "facts": { "os": "windows", "ramGB": 64, "freeGB": 900, "gpus": [{ "name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia", "vramGB": 24, "computeCap": 8.9 }] },
+      "expect": { "gpuBackend": "cuda", "checkpoint.id": "flux-schnell", "checkpoint.steps": 4, "checkpoint.cfg": 1.0, "llm.model": "qwen3:30b-a3b", "llm.contextLength": 32768 }
+    },
+    {
+      "name": "RX 9070 XT 16 GB on CachyOS",
+      "facts": { "os": "linux", "ramGB": 64, "freeGB": 800, "gpus": [{ "name": "AMD Radeon RX 9070 XT", "vendor": "amd", "vramGB": 16, "computeCap": null }] },
+      "expect": { "gpuBackend": "rocm", "imageEngine": "comfy", "comfy.build": "linux-rocm", "checkpoint.id": "flux-schnell", "llm.runtime": "ollama", "llm.model": "qwen3:30b-a3b", "llm.contextLength": 32768 }
+    },
+    {
+      "name": "RX 9070 XT 16 GB on Windows (don't fight it: Gemini images, Vulkan llama.cpp)",
+      "facts": { "os": "windows", "ramGB": 64, "freeGB": 800, "gpus": [{ "name": "AMD Radeon RX 9070 XT", "vendor": "amd", "vramGB": 16, "computeCap": null }] },
+      "expect": {
+        "gpuBackend": "cloud", "imageEngine": "gemini", "comfy": null, "checkpoint": null,
+        "llm.runtime": "llamacpp-vulkan", "llm.url": "http://127.0.0.1:8080", "llm.model": "qwen3:30b-a3b",
+        "llm.ggufUrl": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "name": "Intel integrated graphics, 8 GB RAM",
+      "facts": { "os": "windows", "ramGB": 8, "freeGB": 100, "gpus": [{ "name": "Intel(R) UHD Graphics 620", "vendor": "intel", "vramGB": 1, "computeCap": null }] },
+      "expect": { "gpuBackend": "cpu", "imageEngine": "gemini", "comfy": null, "llm.model": "qwen3:4b", "llm.contextLength": 4096 }
+    },
+    {
+      "name": "Ancient NVIDIA (Kepler, compute 3.5)",
+      "facts": { "os": "windows", "ramGB": 16, "freeGB": 300, "gpus": [{ "name": "NVIDIA GeForce GTX 780", "vendor": "nvidia", "vramGB": 6, "computeCap": 3.5 }] },
+      "expect": { "gpuBackend": "cpu", "imageEngine": "gemini", "llm.model": "qwen3:8b", "llm.contextLength": 8192 }
+    },
+    {
+      "name": "LM Studio already running, no Ollama: use it instead of installing Ollama",
+      "facts": { "os": "windows", "ramGB": 32, "freeGB": 300, "servers": { "lmstudio": true, "ollama": false }, "gpus": [{ "name": "NVIDIA GeForce RTX 4070", "vendor": "nvidia", "vramGB": 12, "computeCap": 8.9 }] },
+      "expect": { "llm.runtime": "lmstudio", "llm.url": "http://127.0.0.1:1234" }
+    },
+    {
+      "name": "Laptop: Intel iGPU plus an RTX card (the NVIDIA card is the one that matters)",
+      "facts": { "os": "windows", "ramGB": 32, "freeGB": 300, "gpus": [{ "name": "Intel(R) Iris(R) Xe Graphics", "vendor": "intel", "vramGB": 2, "computeCap": null }, { "name": "NVIDIA GeForce RTX 4060 Laptop GPU", "vendor": "nvidia", "vramGB": 8, "computeCap": 8.9 }] },
+      "expect": { "gpuBackend": "cuda", "summary.gpuName": "NVIDIA GeForce RTX 4060 Laptop GPU", "checkpoint.id": "dreamshaper-sd15", "llm.model": "qwen3:8b" }
+    }
+  ]
+}

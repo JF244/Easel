@@ -3,25 +3,34 @@
   Sets up Easel and everything around it on a Windows PC, sized to its hardware.
 
 .DESCRIPTION
-  Looks at this PC (graphics card and its memory, RAM, free disk space, what's
-  already installed), shows a plan, and after you say yes:
+  1. Detects this PC (graphics card, its real memory and NVIDIA compute
+     capability, RAM, disk, running model servers, installed tools).
+  2. Resolves that into a profile (EaselProfile.ps1, the same rules as the
+     Linux resolver, tested against installer/profile-cases.json).
+  3. Shows the plan and, after you say yes, installs from the profile:
+       - Easel (from the installer next to this script)
+       - the seven Crafting Apps
+       - ComfyUI for NVIDIA cards: the latest build for RTX and GTX 16xx; for
+         Pascal and older, ComfyUI pinned to v0.7.0 with PyTorch 2.6.0+cu124
+       - the checkpoint that fits the graphics memory (DreamShaper, SDXL or Flux)
+       - the local brain: Ollama (or an LM Studio / Ollama already running), or
+         on AMD + Windows llama.cpp's Vulkan build with a GGUF model
+       - Git and Claude Code
+       - Easel's settings, written from the profile, and the hardware profile
+         Easel reads to warn before ComfyUI jobs this GPU can't run
 
-    - installs Easel (from the installer next to this script)
-    - installs the Crafting Apps: PhotoCraft, VectorCraft, FilmCraft,
-      LightCraft, PdfCraft, EffectCraft, DesignCraft
-    - installs ComfyUI (NVIDIA, AMD or CPU build) and an image model that fits
-      your graphics memory, with a Start ComfyUI shortcut
-    - installs Ollama and a local brain model that fits your PC
-    - installs Git for Windows and Claude Code (the brain that can drive the editors)
-    - points Easel's settings at all of it
-
-  Running it again is safe: anything already installed is skipped.
+  Running it again is safe: anything already installed is skipped, and
+  existing Easel settings and keys are kept.
 
 .PARAMETER DryRun
   Only detect and show the plan. Changes nothing.
 
 .PARAMETER CheckLinks
-  With -DryRun: also check that every download in the plan is reachable.
+  With -DryRun: also check that every download the plan needs is reachable.
+
+.PARAMETER FactsFile
+  Use hardware facts from this JSON file instead of detecting (for testing a
+  plan for another PC, e.g. the "facts" of a case in profile-cases.json).
 
 .PARAMETER Yes
   Don't ask; accept the plan.
@@ -37,6 +46,7 @@ param(
   [switch]$CheckLinks,
   [switch]$Yes,
   [string]$InstallDir = "",
+  [string]$FactsFile = "",
   [switch]$SkipApps,
   [switch]$SkipComfy,
   [switch]$SkipModels,
@@ -50,11 +60,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"  # Invoke-WebRequest is 10x slower with the progress bar on.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# ---------------------------------------------------------------------------
-# What gets installed, and from where. Release file names are looked up at run
-# time from each project's latest GitHub release, so new versions just work.
-# ---------------------------------------------------------------------------
+. (Join-Path $PSScriptRoot "EaselProfile.ps1")
 
 $CraftApps = @(
   @{ Id = "photocraft";  Name = "PhotoCraft";  Replaces = "Photoshop" },
@@ -65,41 +71,20 @@ $CraftApps = @(
   @{ Id = "effectcraft"; Name = "EffectCraft"; Replaces = "After Effects" },
   @{ Id = "designcraft"; Name = "DesignCraft"; Replaces = "InDesign" }
 )
-
 $ComfyRepo = "Comfy-Org/ComfyUI"
+$LlamaCppRepo = "ggml-org/llama.cpp"
 $SevenZipUrl = "https://www.7-zip.org/a/7zr.exe"
 $OllamaSetupUrl = "https://ollama.com/download/OllamaSetup.exe"
 $ClaudeInstallUrl = "https://claude.ai/install.ps1"
-
-# Image models by graphics memory. All are openly downloadable, no account needed.
-$ImageModels = @(
-  @{ MinVramGB = 16; Name = "FLUX.1 schnell (fp8)"; File = "flux1-schnell-fp8.safetensors"; SizeGB = 17.2
-     Url = "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors"
-     Steps = 4; Cfg = 1.0; Sampler = "euler"; Scheduler = "simple"; BaseSize = 1024; Negative = "" },
-  @{ MinVramGB = 8; Name = "Stable Diffusion XL base"; File = "sd_xl_base_1.0.safetensors"; SizeGB = 6.9
-     Url = "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
-     Steps = 28; Cfg = 6.0; Sampler = "euler"; Scheduler = "normal"; BaseSize = 1024; Negative = "blurry, low quality, watermark, text artifacts" },
-  @{ MinVramGB = 4; Name = "Stable Diffusion 1.5"; File = "v1-5-pruned-emaonly.safetensors"; SizeGB = 4.3
-     Url = "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
-     Steps = 25; Cfg = 7.0; Sampler = "euler"; Scheduler = "normal"; BaseSize = 512; Negative = "blurry, low quality, watermark, text artifacts" }
-)
-
-# Local brain models for Ollama, by graphics memory (or system RAM without a GPU).
-$BrainModels = @(
-  @{ MinGB = 16; Model = "gpt-oss:20b"; SizeGB = 14 },
-  @{ MinGB = 10; Model = "qwen3:14b";  SizeGB = 9.3 },
-  @{ MinGB = 6;  Model = "qwen3:8b";   SizeGB = 5.2 },
-  @{ MinGB = 0;  Model = "qwen3:4b";   SizeGB = 2.6 }
-)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA "EaselSuite" }
-$LogDir = Join-Path $env:LOCALAPPDATA "EaselSuite"
-New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$LogFile = Join-Path $LogDir "setup.log"
+$SuiteDir = Join-Path $env:LOCALAPPDATA "EaselSuite"
+New-Item -ItemType Directory -Force -Path $SuiteDir | Out-Null
+$LogFile = Join-Path $SuiteDir "setup.log"
 
 function Say([string]$Text, [string]$Color = "Gray") {
   Write-Host $Text -ForegroundColor $Color
@@ -115,9 +100,10 @@ function Test-Admin {
   (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Get-LatestRelease([string]$Repo) {
+function Get-Release([string]$Repo, [string]$Tag = "") {
   $headers = @{ "User-Agent" = "Easel-Setup"; "Accept" = "application/vnd.github+json" }
-  Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers -TimeoutSec 60
+  $path = if ($Tag) { "releases/tags/$Tag" } else { "releases/latest" }
+  Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/$path" -Headers $headers -TimeoutSec 60
 }
 
 function Find-Asset($Release, [string[]]$Patterns) {
@@ -144,8 +130,7 @@ function Test-Url([string]$Url) {
 # Big files go through curl.exe (built into Windows 10 and 11): it resumes
 # interrupted downloads and retries, which matters for 17 GB models.
 function Get-File([string]$Url, [string]$Destination) {
-  $dir = Split-Path -Parent $Destination
-  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
   $partial = "$Destination.part"
   $curl = Join-Path $env:SystemRoot "System32\curl.exe"
   if (Test-Path $curl) {
@@ -170,6 +155,15 @@ function Update-Path {
   $env:Path = "$machine;$user"
 }
 
+function Add-UserPath([string]$Dir) {
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if (-not $userPath) { $userPath = "" }
+  if (($userPath -split ";") -notcontains $Dir) {
+    [Environment]::SetEnvironmentVariable("Path", (($userPath.TrimEnd(";"), $Dir) -join ";").TrimStart(";"), "User")
+  }
+  Update-Path
+}
+
 function Install-Winget([string]$Id) {
   if (-not (Test-Command "winget")) { throw "winget isn't available. Install 'App Installer' from the Microsoft Store, then run this again." }
   & winget install --exact --id $Id --silent --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Host
@@ -191,8 +185,7 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [strin
 function Write-JsonNoBom([string]$Path, $Object) {
   # Easel reads plain UTF-8; Windows PowerShell's UTF8 adds a BOM, so write it directly.
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
-  $json = $Object | ConvertTo-Json -Depth 20
-  [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($Path, ($Object | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
 }
 
 function Set-Prop($Object, [string]$Name, $Value) {
@@ -202,55 +195,6 @@ function Set-Prop($Object, [string]$Name, $Value) {
 function Get-Prop($Object, [string]$Name) {
   if ($Object -and $Object.PSObject.Properties[$Name]) { return $Object.$Name }
   return $null
-}
-
-# ---------------------------------------------------------------------------
-# Detect this PC
-# ---------------------------------------------------------------------------
-
-function Get-Gpus {
-  $gpus = @()
-  $classKey = "HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-  # The registry has the real memory size; Win32_VideoController caps it at 4 GB.
-  $registry = @{}
-  Get-ChildItem $classKey -ErrorAction SilentlyContinue | ForEach-Object {
-    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-    if ($p -and $p.DriverDesc) {
-      $bytes = $p."HardwareInformation.qwMemorySize"
-      if (-not $bytes) { $bytes = $p."HardwareInformation.MemorySize" }
-      if ($bytes -is [byte[]]) { $bytes = [BitConverter]::ToUInt64(($bytes + (New-Object byte[] 8))[0..7], 0) }
-      if ($bytes) { $registry[$p.DriverDesc] = [double]$bytes }
-    }
-  }
-  foreach ($vc in Get-CimInstance Win32_VideoController) {
-    $name = [string]$vc.Name
-    $bytes = $registry[$name]
-    if (-not $bytes) { $bytes = [double]$vc.AdapterRAM }
-    $vendor = "other"
-    if ($name -match "NVIDIA") { $vendor = "nvidia" }
-    elseif ($name -match "AMD|Radeon") { $vendor = "amd" }
-    elseif ($name -match "Intel") { $vendor = "intel" }
-    if ($name -match "Microsoft Basic|Remote Display|Hyper-V|Parsec|Virtual") { continue }
-    $gpus += [pscustomobject]@{ Name = $name; Vendor = $vendor; VramGB = [math]::Round($bytes / 1GB, 1) }
-  }
-  # nvidia-smi knows NVIDIA memory exactly.
-  if (Test-Command "nvidia-smi") {
-    try {
-      $lines = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null
-      foreach ($line in $lines) {
-        $parts = $line -split ","
-        $gpu = $gpus | Where-Object { $_.Name -eq $parts[0].Trim() } | Select-Object -First 1
-        if ($gpu) { $gpu.VramGB = [math]::Round([double]$parts[1] / 1024, 1) }
-      }
-    } catch { }
-  }
-  return $gpus
-}
-
-function Test-AmdSupported([string]$Name) {
-  # ComfyUI's AMD build supports RDNA 3, 3.5 and 4: Radeon RX 7000 and 9000,
-  # and the Radeon 780M/880M/890M/8060S class of laptop chips.
-  return ($Name -match "RX\s*(7\d{3}|9\d{3})" -or $Name -match "Radeon\s*(7[4-9]0M|8[0-9]0M|80[4-6]0S|AI)" -or $Name -match "Radeon PRO W7\d{3}")
 }
 
 function Get-EaselInstall {
@@ -283,60 +227,68 @@ function Get-OllamaExe {
 }
 
 function Get-ClaudeExe {
-  $cmd = Get-Command claude -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
+  # Prefer the native claude.exe; an npm claude.cmd works too (Easel resolves it).
   $exe = Join-Path $env:USERPROFILE ".local\bin\claude.exe"
   if (Test-Path $exe) { return $exe }
-  return $null
+  return (Find-EaselTool "claude")
+}
+
+# The ComfyUI folder that holds run_*.bat, and the launcher that suits this PC.
+function Find-ComfyLauncher([string]$Dir, [string]$Backend) {
+  $bats = @(Get-ChildItem -Path $Dir -Filter "run_*.bat" -Recurse -Depth 2 -ErrorAction SilentlyContinue)
+  if ($bats.Count -eq 0) { return $null }
+  $prefer = if ($Backend -eq "cuda" -or $Backend -eq "cuda-legacy") { @("nvidia", "gpu") } else { @("cpu") }
+  foreach ($word in $prefer) {
+    $hit = $bats | Where-Object { $_.Name -match $word -and $_.Name -notmatch "fast|fp16" } | Select-Object -First 1
+    if ($hit) { return $hit }
+  }
+  return ($bats | Select-Object -First 1)
 }
 
 # ---------------------------------------------------------------------------
-# Plan
+# Detect and resolve
 # ---------------------------------------------------------------------------
 
 Say "Easel setup  ($(Get-Date -Format 'yyyy-MM-dd HH:mm'))   log: $LogFile" "White"
-
 Step "Looking at this PC"
-$os = Get-CimInstance Win32_OperatingSystem
-$cs = Get-CimInstance Win32_ComputerSystem
-$ramGB = [math]::Round($cs.TotalPhysicalMemory / 1GB)
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-$drive = (Split-Path -Qualifier $InstallDir).TrimEnd(":")
-$freeGB = [math]::Round((Get-PSDrive -Name $drive).Free / 1GB)
-$gpus = @(Get-Gpus)
-$gpu = $gpus | Sort-Object VramGB -Descending | Select-Object -First 1
-
-Say "   Windows:  $($os.Caption) (build $($os.BuildNumber), $arch)"
-Say "   Memory:   $ramGB GB"
-Say "   Disk:     $freeGB GB free on ${drive}: (install folder $InstallDir)"
-if ($gpus.Count -eq 0) { Say "   Graphics: none found" }
-foreach ($g in $gpus) { Say ("   Graphics: {0} ({1} GB)" -f $g.Name, $g.VramGB) }
-
-$vram = if ($gpu) { [double]$gpu.VramGB } else { 0 }
-$comfyBuild = "cpu"
-$comfyNote = "no supported graphics card, so ComfyUI runs on the CPU (slow; Gemini is the better choice here)"
-if ($gpu -and $gpu.Vendor -eq "nvidia" -and $vram -ge 4) {
-  $comfyBuild = "nvidia"; $comfyNote = "NVIDIA build"
-} elseif ($gpu -and $gpu.Vendor -eq "amd" -and (Test-AmdSupported $gpu.Name)) {
-  $comfyBuild = "amd"; $comfyNote = "AMD build (ROCm)"
-} elseif ($gpu -and $gpu.Vendor -eq "amd") {
-  $comfyNote = "this Radeon is older than the RX 7000 series, which ComfyUI's AMD build needs, so it runs on the CPU"
-} elseif ($gpu -and $gpu.Vendor -eq "intel") {
-  $comfyNote = "ComfyUI has no ready-made Intel build, so it runs on the CPU"
+$catalog = Get-EaselCatalog
+if ($FactsFile) {
+  $facts = Get-Content $FactsFile -Raw | ConvertFrom-Json
+  if ($facts.PSObject.Properties["facts"]) { $facts = $facts.facts }
+  Warn "Using hardware facts from $FactsFile instead of this PC's."
+} else {
+  $facts = Get-EaselHardwareFacts $InstallDir
 }
+$hw = Resolve-EaselProfile $facts $catalog
+$arch = if ($facts.arch) { $facts.arch } else { "x64" }
 
-$gpuForModels = if ($comfyBuild -eq "cpu") { 0 } else { $vram }
-$imageModel = $ImageModels | Where-Object { $gpuForModels -ge $_.MinVramGB } | Select-Object -First 1
-$brainBasis = if ($comfyBuild -ne "cpu") { $vram } else { [math]::Floor($ramGB / 3) }
-$brainModel = $BrainModels | Where-Object { $brainBasis -ge $_.MinGB } | Select-Object -First 1
+Say "   Memory:   $($facts.ramGB) GB, $($facts.cpuName)"
+Say "   Disk:     $($facts.freeGB) GB free (install folder $InstallDir)"
+if (@($facts.gpus).Count -eq 0) { Say "   Graphics: none found" }
+foreach ($g in @($facts.gpus)) {
+  $capText = if ($null -ne $g.computeCap) { ", compute {0}" -f $g.computeCap } else { "" }
+  Say ("   Graphics: {0} ({1} GB{2})" -f $g.name, $g.vramGB, $capText)
+}
+$backendText = @{
+  "cuda" = "NVIDIA, current PyTorch"
+  "cuda-legacy" = "NVIDIA Pascal or older: ComfyUI $($catalog.legacyNvidia.comfyTag) with PyTorch $($catalog.legacyNvidia.torch)"
+  "rocm" = "AMD with ROCm"
+  "cloud" = "AMD on Windows: Gemini for images, llama.cpp (Vulkan) for the local brain"
+  "cpu" = "no usable GPU: Gemini for images, the local brain on the CPU"
+}[$hw.gpuBackend]
+Say "   Backend:  $backendText" "White"
+foreach ($w in @($hw.warnings)) { Warn $w }
 
+$comfyDir = Join-Path $InstallDir "ComfyUI"
+$llamaDir = Join-Path $InstallDir "llama.cpp"
+$llmDir = Join-Path $InstallDir "models"
 $easelExe = Get-EaselInstall
 $easelInstaller = Get-ChildItem -Path $PSScriptRoot -Filter "Easel_*-setup.exe" -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
-$comfyDir = Join-Path $InstallDir "ComfyUI"
-$comfyInstalled = [bool](Get-ChildItem -Path $comfyDir -Filter "run_*.bat" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
 $ollamaExe = Get-OllamaExe
 $claudeExe = Get-ClaudeExe
-$gitInstalled = Test-Command "git"
+$llm = $hw.llm
+$ckpt = $hw.checkpoint
+$useComfy = $hw.comfy -and -not $SkipComfy
 
 $plan = New-Object System.Collections.ArrayList
 function Add-Plan([string]$Key, [string]$What, [double]$SizeGB, [bool]$Done) {
@@ -346,23 +298,38 @@ Add-Plan "easel" "Easel" 0.01 ([bool]$easelExe)
 if (-not $SkipApps) {
   foreach ($app in $CraftApps) { Add-Plan "craft:$($app.Id)" "$($app.Name) (instead of $($app.Replaces))" 0.1 ([bool](Get-CraftInstall $app)) }
 }
-if (-not $SkipComfy) {
-  Add-Plan "comfy" "ComfyUI, $comfyNote" 3.0 $comfyInstalled
-  if (-not $SkipModels -and $imageModel) {
-    $modelPath = Join-Path $comfyDir "ComfyUI\models\checkpoints\$($imageModel.File)"
-    $modelDone = [bool](Get-ChildItem -Path $comfyDir -Filter $imageModel.File -Recurse -Depth 5 -ErrorAction SilentlyContinue | Select-Object -First 1)
-    Add-Plan "model" "Image model: $($imageModel.Name)" $imageModel.SizeGB $modelDone
+if ($useComfy) {
+  $comfyLabel = if ($hw.comfy.pinTag) { "ComfyUI $($hw.comfy.pinTag) (pinned for this GPU)" } else { "ComfyUI (latest, NVIDIA build)" }
+  Add-Plan "comfy" $comfyLabel 2.5 ([bool](Find-ComfyLauncher $comfyDir $hw.gpuBackend))
+  if ($hw.comfy.pipPackages.Count -gt 0) { Add-Plan "torchpin" "PyTorch $($hw.comfy.torch) inside ComfyUI" 2.5 $false }
+  if (-not $SkipModels -and $ckpt) {
+    $have = [bool](Get-ChildItem -Path $comfyDir -Filter $ckpt.file -Recurse -Depth 5 -ErrorAction SilentlyContinue | Select-Object -First 1)
+    Add-Plan "checkpoint" "Image model: $($ckpt.name)" $ckpt.sizeGB $have
   }
+} elseif (-not $hw.comfy) {
+  Skip "ComfyUI: not installed on this PC; images use Gemini (add your key in Easel)"
 }
 if (-not $SkipLocalBrain) {
-  Add-Plan "ollama" "Ollama (runs the local brain)" 1.0 ([bool]$ollamaExe)
-  if (-not $SkipModels) { Add-Plan "brainmodel" "Local brain model: $($brainModel.Model)" $brainModel.SizeGB $false }
+  switch ($llm.runtime) {
+    "ollama" {
+      Add-Plan "ollama" "Ollama (runs the local brain)" 1.0 ([bool]$ollamaExe)
+      if (-not $SkipModels) { Add-Plan "brainmodel" "Local brain: $($llm.model), $($llm.contextLength) token context" $llm.sizeGB $false }
+    }
+    "lmstudio" { Skip "Local brain: LM Studio is already running; Easel will use it" }
+    "llamacpp-vulkan" {
+      Add-Plan "llamacpp" "llama.cpp (Vulkan build) for the local brain" 0.1 (Test-Path (Join-Path $llamaDir "llama-server.exe"))
+      if (-not $SkipModels) {
+        $gguf = Join-Path $llmDir (Split-Path -Leaf $llm.ggufUrl)
+        Add-Plan "gguf" "Local brain: $($llm.model) (GGUF), $($llm.contextLength) token context" $llm.sizeGB (Test-Path $gguf)
+      }
+    }
+  }
 }
 if (-not $SkipClaude) {
-  Add-Plan "git" "Git for Windows (Claude Code needs it)" 0.3 $gitInstalled
+  Add-Plan "git" "Git for Windows (Claude Code needs it)" 0.3 (Test-Command "git")
   Add-Plan "claude" "Claude Code (the brain that drives the editors)" 0.2 ([bool]$claudeExe)
 }
-Add-Plan "settings" "Point Easel at all of the above" 0 $false
+Add-Plan "settings" "Write Easel's settings and hardware profile" 0 $false
 
 Step "The plan"
 $needGB = 0
@@ -373,32 +340,39 @@ foreach ($item in $plan) {
     $needGB += $item.SizeGB
   }
 }
-Say ("   About {0} GB to download and store; {1} GB free." -f [math]::Ceiling($needGB), $freeGB)
-if ($needGB + 5 -gt $freeGB) { Warn "That's tight on space. Free up room, or use -InstallDir on a bigger drive, or -SkipModels." }
-if (-not $easelExe -and -not $easelInstaller) { Warn "No Easel installer next to this script; Easel itself will be skipped. Keep this script in the same folder as Easel_..._x64-setup.exe." }
+Say ("   About {0} GB to download and store; {1} GB free." -f [math]::Ceiling($needGB), $facts.freeGB)
+if ($needGB + 5 -gt [double]$facts.freeGB) { Warn "That's tight on space. Free up room, use -InstallDir on a bigger drive, or -SkipModels." }
+if (-not $easelExe -and -not $easelInstaller) { Warn "No Easel installer next to this script; Easel itself will be skipped." }
 
 if ($DryRun) {
   if ($CheckLinks) {
     Step "Checking every download link"
-    $bad = 0
+    $script:bad = 0
     $check = { param($label, $ok) if ($ok) { Ok $label } else { Warn "NOT reachable: $label"; $script:bad++ } }
     foreach ($app in $CraftApps) {
       try {
-        $rel = Get-LatestRelease "storytold/$($app.Id)"
+        $rel = Get-Release "storytold/$($app.Id)"
         $asset = Find-Asset $rel @("^$($app.Id)-.*-windows-$arch\.msi$", "windows-$arch.*\.msi$", "\.msi$")
-        & $check "$($app.Name) $($rel.tag_name): $(if ($asset) { $asset.name } else { 'no Windows installer in the latest release' })" ([bool]$asset)
+        & $check "$($app.Name) $($rel.tag_name): $(if ($asset) { $asset.name } else { 'no Windows installer' })" ([bool]$asset)
       } catch { & $check "$($app.Name): $($_.Exception.Message)" $false }
     }
+    foreach ($tag in @("", $catalog.legacyNvidia.comfyTag)) {
+      try {
+        $rel = Get-Release $ComfyRepo $tag
+        $asset = Find-Asset $rel @("windows_portable_nvidia.*\.7z$")
+        & $check "ComfyUI $($rel.tag_name) NVIDIA build: $(if ($asset) { $asset.name } else { 'missing' })" ([bool]$asset)
+      } catch { & $check "ComfyUI release '$tag': $($_.Exception.Message)" $false }
+    }
     try {
-      $rel = Get-LatestRelease $ComfyRepo
-      foreach ($build in @("nvidia", "amd")) {
-        $asset = Find-Asset $rel @("windows_portable_$build.*\.7z$")
-        & $check "ComfyUI $($rel.tag_name) $build build: $(if ($asset) { $asset.name } else { 'missing' })" ([bool]$asset)
-      }
-    } catch { & $check "ComfyUI releases: $($_.Exception.Message)" $false }
-    foreach ($m in $ImageModels) { & $check "$($m.Name): $($m.Url)" (Test-Url $m.Url) }
+      $rel = Get-Release $LlamaCppRepo
+      $asset = Find-Asset $rel @("bin-win-vulkan-$arch\.zip$")
+      & $check "llama.cpp $($rel.tag_name) Vulkan build: $(if ($asset) { $asset.name } else { 'missing' })" ([bool]$asset)
+    } catch { & $check "llama.cpp releases: $($_.Exception.Message)" $false }
+    foreach ($c in $catalog.checkpoints.PSObject.Properties) { & $check "$($c.Value.name): $($c.Value.url)" (Test-Url $c.Value.url) }
+    foreach ($l in $catalog.llms.PSObject.Properties) { & $check "$($l.Name) GGUF: $($l.Value.ggufUrl)" (Test-Url $l.Value.ggufUrl) }
+    & $check "PyTorch $($catalog.legacyNvidia.torch) index" (Test-Url ($catalog.legacyNvidia.torchIndex.TrimEnd("/") + "/torch/"))
     foreach ($u in @($SevenZipUrl, $OllamaSetupUrl, $ClaudeInstallUrl)) { & $check $u (Test-Url $u) }
-    if ($bad -gt 0) { Say "$bad link(s) failed." "Red"; exit 1 }
+    if ($script:bad -gt 0) { Say "$($script:bad) link(s) failed." "Red"; exit 1 }
     Ok "All links work."
   }
   Say ""; Say "Dry run: nothing was changed." "White"
@@ -447,7 +421,7 @@ Invoke-Step "easel" {
 
 foreach ($app in $CraftApps) {
   Invoke-Step "craft:$($app.Id)" {
-    $rel = Get-LatestRelease "storytold/$($app.Id)"
+    $rel = Get-Release "storytold/$($app.Id)"
     $asset = Find-Asset $rel @("^$($app.Id)-.*-windows-$arch\.msi$", "windows-$arch.*\.msi$", "\.msi$")
     if (-not $asset) { throw "the latest $($app.Name) release has no Windows installer" }
     $file = Join-Path $downloads $asset.name
@@ -457,11 +431,10 @@ foreach ($app in $CraftApps) {
 }
 
 Invoke-Step "comfy" {
-  $rel = Get-LatestRelease $ComfyRepo
-  # The NVIDIA package also carries the CPU launcher, so it's the CPU fallback too.
-  $wanted = if ($comfyBuild -eq "amd") { "amd" } else { "nvidia" }
-  $asset = Find-Asset $rel @("windows_portable_$wanted.*\.7z$")
-  if (-not $asset) { throw "the latest ComfyUI release has no $wanted Windows package" }
+  # Pascal and older get the pinned release; later ones need comfy_kitchen and PyTorch 2.12+.
+  $rel = Get-Release $ComfyRepo ([string]$hw.comfy.pinTag)
+  $asset = Find-Asset $rel @("windows_portable_nvidia.*\.7z$")
+  if (-not $asset) { throw "ComfyUI $($rel.tag_name) has no NVIDIA Windows package" }
   $archive = Join-Path $downloads $asset.name
   Get-File $asset.browser_download_url $archive
   $sevenZip = Join-Path $downloads "7zr.exe"
@@ -471,33 +444,30 @@ Invoke-Step "comfy" {
   if ($LASTEXITCODE -ne 0) { throw "couldn't unpack $($asset.name) (7-Zip code $LASTEXITCODE)" }
 }
 
-# Find the unpacked ComfyUI folder and the launcher that suits this PC.
-$comfyRoot = $null
-$comfyLauncher = $null
-$bats = @(Get-ChildItem -Path $comfyDir -Filter "run_*.bat" -Recurse -Depth 2 -ErrorAction SilentlyContinue)
-if ($bats.Count -gt 0) {
-  $prefer = switch ($comfyBuild) { "nvidia" { @("nvidia", "gpu") } "amd" { @("amd", "gpu") } default { @("cpu") } }
-  foreach ($word in $prefer) {
-    $comfyLauncher = $bats | Where-Object { $_.Name -match $word -and $_.Name -notmatch "fast|fp16" } | Select-Object -First 1
-    if ($comfyLauncher) { break }
-  }
-  if (-not $comfyLauncher) { $comfyLauncher = $bats | Select-Object -First 1 }
-  $comfyRoot = $comfyLauncher.DirectoryName
+$comfyLauncher = if ($useComfy) { Find-ComfyLauncher $comfyDir $hw.gpuBackend } else { $null }
+$comfyRoot = if ($comfyLauncher) { $comfyLauncher.DirectoryName } else { $null }
+
+Invoke-Step "torchpin" {
+  if (-not $comfyRoot) { throw "ComfyUI isn't installed" }
+  $python = Join-Path $comfyRoot "python_embeded\python.exe"
+  if (-not (Test-Path $python)) { throw "ComfyUI's python_embeded wasn't found" }
+  $pipArgs = @("-m", "pip", "install", "--force-reinstall", "--no-cache-dir") + @($hw.comfy.pipPackages) + @("--index-url", $hw.comfy.torchIndex)
+  & $python @pipArgs | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "pip couldn't install PyTorch $($hw.comfy.torch)" }
+  $version = (& $python -c "import torch; print(torch.__version__)").Trim()
+  if ($version -ne $hw.comfy.torch) { throw "PyTorch reports $version, expected $($hw.comfy.torch)" }
+  Say "   PyTorch $version is in place. Don't open the ComfyUI Desktop app on this PC: it reinstalls its own PyTorch."
 }
 
-Invoke-Step "model" {
+Invoke-Step "checkpoint" {
   if (-not $comfyRoot) { throw "ComfyUI isn't installed, so there's nowhere to put the model" }
-  $dest = Join-Path $comfyRoot "ComfyUI\models\checkpoints\$($imageModel.File)"
-  Get-File $imageModel.Url $dest
+  Get-File $ckpt.url (Join-Path $comfyRoot "ComfyUI\models\checkpoints\$($ckpt.file)")
 }
 
 if ($comfyLauncher) {
-  $desktop = [Environment]::GetFolderPath("Desktop")
-  New-Shortcut (Join-Path $desktop "Start ComfyUI.lnk") $comfyLauncher.FullName "" $comfyRoot "Starts ComfyUI for Easel"
+  New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "Start ComfyUI.lnk") $comfyLauncher.FullName "" $comfyRoot "Starts ComfyUI for Easel"
   if (-not $NoAutostart) {
-    # Starts minimized at sign-in so Easel's ComfyUI engine is always ready.
-    $startup = [Environment]::GetFolderPath("Startup")
-    New-Shortcut (Join-Path $startup "ComfyUI for Easel.lnk") "cmd.exe" "/c start /min `"ComfyUI`" `"$($comfyLauncher.FullName)`"" $comfyRoot "Starts ComfyUI for Easel"
+    New-Shortcut (Join-Path ([Environment]::GetFolderPath("Startup")) "ComfyUI for Easel.lnk") "cmd.exe" "/c start /min `"ComfyUI`" `"$($comfyLauncher.FullName)`"" $comfyRoot "Starts ComfyUI for Easel"
   }
 }
 
@@ -515,10 +485,44 @@ Invoke-Step "ollama" {
 
 Invoke-Step "brainmodel" {
   if (-not $ollamaExe) { throw "Ollama isn't installed" }
+  # Ollama reads its context window from this; set it for the user so it sticks.
+  [Environment]::SetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH", [string]$llm.contextLength, "User")
+  $env:OLLAMA_CONTEXT_LENGTH = [string]$llm.contextLength
   try { Invoke-RestMethod "http://127.0.0.1:11434/api/version" -TimeoutSec 3 | Out-Null }
   catch { Start-Process $ollamaExe -ArgumentList "serve" -WindowStyle Hidden; Start-Sleep -Seconds 5 }
-  & $ollamaExe pull $brainModel.Model
-  if ($LASTEXITCODE -ne 0) { throw "ollama pull $($brainModel.Model) failed" }
+  & $ollamaExe pull $llm.model
+  if ($LASTEXITCODE -ne 0) { throw "ollama pull $($llm.model) failed" }
+}
+
+Invoke-Step "llamacpp" {
+  $rel = Get-Release $LlamaCppRepo
+  $asset = Find-Asset $rel @("bin-win-vulkan-$arch\.zip$")
+  if (-not $asset) { throw "llama.cpp $($rel.tag_name) has no Vulkan build for Windows $arch" }
+  $zip = Join-Path $downloads $asset.name
+  Get-File $asset.browser_download_url $zip
+  New-Item -ItemType Directory -Force -Path $llamaDir | Out-Null
+  Expand-Archive -Path $zip -DestinationPath $llamaDir -Force
+  # Some releases put the files one folder down; bring llama-server.exe to the top.
+  $server = Get-ChildItem -Path $llamaDir -Filter "llama-server.exe" -Recurse | Select-Object -First 1
+  if (-not $server) { throw "llama-server.exe wasn't in $($asset.name)" }
+  if ($server.DirectoryName -ne $llamaDir) { Copy-Item -Path (Join-Path $server.DirectoryName "*") -Destination $llamaDir -Recurse -Force }
+}
+
+Invoke-Step "gguf" {
+  Get-File $llm.ggufUrl (Join-Path $llmDir (Split-Path -Leaf $llm.ggufUrl))
+}
+
+if ($llm.runtime -eq "llamacpp-vulkan" -and -not $SkipLocalBrain) {
+  $serverExe = Join-Path $llamaDir "llama-server.exe"
+  $gguf = Join-Path $llmDir (Split-Path -Leaf $llm.ggufUrl)
+  if ((Test-Path $serverExe) -and (Test-Path $gguf)) {
+    # Every layer on the GPU (-ngl 999); Vulkan works on Radeon cards without ROCm.
+    $serverArgs = "-m `"$gguf`" -c $($llm.contextLength) -ngl 999 --host 127.0.0.1 --port 8080 --jinja"
+    New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "Start local brain.lnk") $serverExe $serverArgs $llamaDir "Starts llama.cpp for Easel's local brain"
+    if (-not $NoAutostart) {
+      New-Shortcut (Join-Path ([Environment]::GetFolderPath("Startup")) "Easel local brain.lnk") "cmd.exe" "/c start /min `"local brain`" `"$serverExe`" $serverArgs" $llamaDir "Starts llama.cpp for Easel's local brain"
+    }
+  }
 }
 
 Invoke-Step "git" { Install-Winget "Git.Git" }
@@ -528,57 +532,56 @@ Invoke-Step "claude" {
   $p = Start-Process powershell.exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm $ClaudeInstallUrl | iex") -Wait -PassThru -NoNewWindow
   if ($p.ExitCode -ne 0) { throw "the Claude Code installer exited with code $($p.ExitCode)" }
   # The installer leaves ~/.local/bin off PATH, so `claude` wouldn't work in a terminal.
-  $bin = Join-Path $env:USERPROFILE ".local\bin"
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  if (($userPath -split ";") -notcontains $bin) {
-    [Environment]::SetEnvironmentVariable("Path", (($userPath.TrimEnd(";"), $bin) -join ";").TrimStart(";"), "User")
-  }
-  Update-Path
+  Add-UserPath (Join-Path $env:USERPROFILE ".local\bin")
   $script:claudeExe = Get-ClaudeExe
   if (-not $script:claudeExe) { throw "Claude Code installed but claude.exe wasn't found" }
 }
 
 # ---------------------------------------------------------------------------
-# Point Easel at everything. Existing settings and keys are kept; only empty
-# or missing values are filled in.
+# Write Easel's settings from the profile. Existing settings and keys are
+# kept; only empty or missing values are filled in.
 # ---------------------------------------------------------------------------
 
 Invoke-Step "settings" {
+  $profileFile = [pscustomobject][ordered]@{ detected = $facts; resolved = $hw; summary = $hw.summary }
+  Write-JsonNoBom (Join-Path $SuiteDir "hardware-profile.json") $profileFile
+
   $settingsPath = Join-Path $env:APPDATA "app.easel.studio\settings.json"
   $settings = $null
   if (Test-Path $settingsPath) {
-    try { $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json } catch { Warn "Existing settings couldn't be read; a backup is kept as settings.json.bak"; Copy-Item $settingsPath "$settingsPath.bak" -Force }
+    try { $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json }
+    catch { Warn "Existing settings couldn't be read; a backup is kept as settings.json.bak"; Copy-Item $settingsPath "$settingsPath.bak" -Force }
   }
   if (-not $settings) { $settings = [pscustomobject]@{} }
   foreach ($section in @("comfy", "brain", "apps")) { if (-not (Get-Prop $settings $section)) { Set-Prop $settings $section ([pscustomobject]@{}) } }
 
   $comfy = $settings.comfy
   if (-not (Get-Prop $comfy "url")) { Set-Prop $comfy "url" "http://127.0.0.1:8188" }
-  if ($imageModel -and $comfyRoot -and -not (Get-Prop $comfy "checkpoint")) {
-    Set-Prop $comfy "checkpoint" $imageModel.File
-    Set-Prop $comfy "steps" $imageModel.Steps
-    Set-Prop $comfy "cfg" $imageModel.Cfg
-    Set-Prop $comfy "sampler" $imageModel.Sampler
-    Set-Prop $comfy "scheduler" $imageModel.Scheduler
-    Set-Prop $comfy "baseSize" $imageModel.BaseSize
-    Set-Prop $comfy "negative" $imageModel.Negative
+  $ckptOnDisk = $ckpt -and $comfyRoot -and (Test-Path (Join-Path $comfyRoot "ComfyUI\models\checkpoints\$($ckpt.file)"))
+  if ($ckptOnDisk -and -not (Get-Prop $comfy "checkpoint")) {
+    Set-Prop $comfy "checkpoint" $ckpt.file
+    Set-Prop $comfy "steps" $ckpt.steps
+    Set-Prop $comfy "cfg" $ckpt.cfg
+    Set-Prop $comfy "sampler" $ckpt.sampler
+    Set-Prop $comfy "scheduler" $ckpt.scheduler
+    Set-Prop $comfy "baseSize" $ckpt.baseSize
+    Set-Prop $comfy "negative" $ckpt.negative
   }
 
   $brain = $settings.brain
-  if ($ollamaExe -and -not (Get-Prop $brain "localModel")) {
-    Set-Prop $brain "localUrl" "http://127.0.0.1:11434"
-    Set-Prop $brain "localModel" $brainModel.Model
+  if (-not $SkipLocalBrain -and -not (Get-Prop $brain "localModel")) {
+    Set-Prop $brain "localUrl" $llm.url
+    # Ollama names the model; LM Studio and llama-server serve whatever is loaded.
+    Set-Prop $brain "localModel" $(if ($llm.runtime -eq "ollama") { $llm.model } else { "" })
   }
   if ($claudeExe -and -not (Get-Prop $brain "claudeCliPath")) { Set-Prop $brain "claudeCliPath" $claudeExe }
   if (-not (Get-Prop $brain "order")) {
-    # The free local brain plans first; Claude Code is the fallback and the advisor.
-    $order = @()
-    if ($ollamaExe) { $order += "local" }
-    if ($claudeExe) { $order += "claudeCli" }
+    $order = @($hw.brain.order | Where-Object { $_ -ne "claudeCli" -or $claudeExe })
+    if ($SkipLocalBrain) { $order = @($order | Where-Object { $_ -ne "local" }) }
     Set-Prop $brain "order" $order
     if ($claudeExe) {
-      Set-Prop $brain "advisorOrder" @("claudeCli")
-      Set-Prop $brain "advisorMode" "auto"
+      Set-Prop $brain "advisorOrder" @($hw.brain.advisorOrder)
+      Set-Prop $brain "advisorMode" $hw.brain.advisorMode
     }
   }
 
@@ -598,19 +601,20 @@ Invoke-Step "settings" {
 Step "Finished"
 if ($failures.Count -gt 0) {
   Warn "These steps didn't finish: $($failures -join ', '). Run this script again to retry them; the log is $LogFile"
-  $global:LASTEXITCODE = 2
 } else {
   Ok "Everything is set up."
 }
-if ($comfyLauncher -and -not $NoLaunch) {
-  Start-Process cmd.exe -ArgumentList "/c start /min `"ComfyUI`" `"$($comfyLauncher.FullName)`"" -WorkingDirectory $comfyRoot
-  Say "   ComfyUI is starting (first start takes a minute). It also starts at sign-in$(if ($NoAutostart) { ' -- turned off by -NoAutostart' })."
+if (-not $NoLaunch) {
+  if ($comfyLauncher) {
+    Start-Process cmd.exe -ArgumentList "/c start /min `"ComfyUI`" `"$($comfyLauncher.FullName)`"" -WorkingDirectory $comfyRoot
+    Say "   ComfyUI is starting (first start takes a minute)."
+  }
 }
 Say ""
 Say "Last steps, once:" "White"
 if ($claudeExe) { Say "   1. Sign in to Claude Code: a window opens now; follow its sign-in, then close it." }
-Say "   2. In Easel, open Settings > Gemini and paste your Gemini API key (aistudio.google.com) for Nano Banana and the Gemini 4 brain."
-Say "   3. Antigravity (agy) isn't installed by this script; get it from Google if you want it as a brain."
+Say "   2. In Easel, open Settings > Gemini and paste your Gemini API key (aistudio.google.com)$(if ($hw.imageEngine -eq 'gemini') { '. On this PC Gemini makes the images' })."
+Say "   3. In Easel's Settings, press Test next to each brain to check it answers."
 if (-not $NoLaunch) {
   if ($claudeExe) { Start-Process powershell.exe -ArgumentList @("-NoExit", "-Command", "& '$claudeExe'") }
   if ($easelExe) { Start-Process $easelExe }
