@@ -44,6 +44,49 @@ pub async fn generate(client: &reqwest::Client, api_key: &str, model: &str, req:
 
 /// Image-capable Gemini models your key can use, for the model picker.
 pub async fn list_image_models(client: &reqwest::Client, api_key: &str) -> Result<Vec<String>, String> {
+  Ok(image_model_names(&fetch_models(client, api_key).await?))
+}
+
+/// Text models your key can use, for the Gemini brain.
+pub async fn list_text_models(client: &reqwest::Client, api_key: &str) -> Result<Vec<String>, String> {
+  Ok(text_model_names(&fetch_models(client, api_key).await?))
+}
+
+/// One answer from a Gemini text model: the Gemini brain.
+pub async fn complete(client: &reqwest::Client, api_key: &str, model: &str, system: &str, user: &str) -> Result<String, String> {
+  if api_key.trim().is_empty() {
+    return Err("no Gemini API key is set".into());
+  }
+  let model = match model.trim() {
+    "" => newest_pro(&list_text_models(client, api_key).await?).ok_or("your Gemini key lists no text models")?,
+    m => m.to_string(),
+  };
+  let body = json!({
+    "systemInstruction": { "parts": [{ "text": system }] },
+    "contents": [{ "role": "user", "parts": [{ "text": user }] }],
+  });
+  let resp = client
+    .post(format!("{API_BASE}/models/{model}:generateContent"))
+    .header("x-goog-api-key", api_key.trim())
+    .json(&body)
+    .send()
+    .await
+    .map_err(|e| format!("couldn't reach the Gemini API: {e}"))?;
+  let status = resp.status();
+  let text = resp.text().await.map_err(|e| e.to_string())?;
+  if !status.is_success() {
+    return Err(error_text(status, &text));
+  }
+  let value: Value = serde_json::from_str(&text).map_err(|_| "Gemini sent a reply Easel couldn't read".to_string())?;
+  let answer = answer_text(&value);
+  if answer.trim().is_empty() {
+    let blocked = value.pointer("/promptFeedback/blockReason").and_then(Value::as_str).unwrap_or("no text returned");
+    return Err(format!("Gemini gave no answer ({blocked})"));
+  }
+  Ok(answer)
+}
+
+async fn fetch_models(client: &reqwest::Client, api_key: &str) -> Result<Value, String> {
   if api_key.trim().is_empty() {
     return Err("Add your Gemini API key first.".into());
   }
@@ -58,8 +101,7 @@ pub async fn list_image_models(client: &reqwest::Client, api_key: &str) -> Resul
   if !status.is_success() {
     return Err(format!("Gemini said: {}", error_text(status, &text)));
   }
-  let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-  Ok(image_model_names(&value))
+  serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
 fn build_body(req: &GenerateRequest) -> Result<Value, String> {
@@ -140,6 +182,56 @@ fn parse_response(value: &Value) -> Result<Vec<Output>, String> {
     output.note = note.clone();
   }
   Ok(outputs)
+}
+
+/// The visible answer, without "thought" parts.
+fn answer_text(value: &Value) -> String {
+  value
+    .pointer("/candidates/0/content/parts")
+    .and_then(Value::as_array)
+    .into_iter()
+    .flatten()
+    .filter(|p| p.get("thought").and_then(Value::as_bool) != Some(true))
+    .filter_map(|p| p.get("text").and_then(Value::as_str))
+    .collect::<Vec<_>>()
+    .join("")
+}
+
+/// Gemini text models: chat-capable, not image, embedding, TTS or audio models.
+fn text_model_names(value: &Value) -> Vec<String> {
+  let mut names: Vec<String> = generate_content_models(value)
+    .into_iter()
+    .filter(|n| n.starts_with("gemini") && !["image", "embedding", "tts", "audio", "live"].iter().any(|x| n.contains(x)))
+    .collect();
+  names.sort();
+  names.dedup();
+  names
+}
+
+/// The highest-numbered stable Pro model, falling back to any newest model.
+fn newest_pro(names: &[String]) -> Option<String> {
+  let version = |n: &str| -> f64 {
+    n.trim_start_matches("gemini-").split('-').next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0)
+  };
+  let rank = |n: &String| (n.contains("pro") as u8, !n.contains("preview") && !n.contains("exp") as bool, version(n));
+  names.iter().max_by(|a, b| rank(a).partial_cmp(&rank(b)).unwrap_or(std::cmp::Ordering::Equal)).cloned()
+}
+
+fn generate_content_models(value: &Value) -> Vec<String> {
+  value
+    .get("models")
+    .and_then(Value::as_array)
+    .into_iter()
+    .flatten()
+    .filter(|m| {
+      m.get("supportedGenerationMethods")
+        .and_then(Value::as_array)
+        .map(|methods| methods.iter().any(|x| x.as_str() == Some("generateContent")))
+        .unwrap_or(false)
+    })
+    .filter_map(|m| m.get("name").and_then(Value::as_str))
+    .map(|name| name.trim_start_matches("models/").to_string())
+    .collect()
 }
 
 fn image_model_names(value: &Value) -> Vec<String> {
@@ -227,6 +319,29 @@ mod tests {
   fn explains_a_blocked_prompt() {
     let reply = json!({ "promptFeedback": { "blockReason": "SAFETY" } });
     assert!(parse_response(&reply).unwrap_err().contains("SAFETY"));
+  }
+
+  #[test]
+  fn picks_the_newest_stable_pro_text_model() {
+    let listing = json!({ "models": [
+      { "name": "models/gemini-2.5-pro", "supportedGenerationMethods": ["generateContent"] },
+      { "name": "models/gemini-4-pro", "supportedGenerationMethods": ["generateContent"] },
+      { "name": "models/gemini-4-pro-preview-09", "supportedGenerationMethods": ["generateContent"] },
+      { "name": "models/gemini-4-flash", "supportedGenerationMethods": ["generateContent"] },
+      { "name": "models/gemini-4-flash-image", "supportedGenerationMethods": ["generateContent"] },
+      { "name": "models/text-embedding-005", "supportedGenerationMethods": ["embedContent"] }
+    ]});
+    let names = text_model_names(&listing);
+    assert!(!names.iter().any(|n| n.contains("image")));
+    assert_eq!(newest_pro(&names).as_deref(), Some("gemini-4-pro"));
+  }
+
+  #[test]
+  fn answer_skips_thought_parts() {
+    let reply = json!({ "candidates": [{ "content": { "parts": [
+      { "text": "thinking…", "thought": true }, { "text": "{\"reply\":\"hi\"}" }
+    ]}}]});
+    assert_eq!(answer_text(&reply), "{\"reply\":\"hi\"}");
   }
 
   #[test]

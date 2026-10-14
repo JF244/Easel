@@ -66,10 +66,21 @@ export default function App() {
             Couldn't load your settings: {settingsError}
           </p>
         )}
-        {page === "brain" && <BrainPage />}
-        {page === "create" && <CreatePage />}
-        {page === "edit" && <EditPage />}
-        {page === "gallery" && <GalleryPage />}
+        {/* These pages stay mounted when hidden, so chats, results, the edit
+            mask and running jobs survive switching tabs. */}
+        <div hidden={page !== "brain"} className="h-full">
+          <BrainPage />
+        </div>
+        <div hidden={page !== "create"}>
+          <CreatePage />
+        </div>
+        <div hidden={page !== "edit"}>
+          <EditPage />
+        </div>
+        <div hidden={page !== "gallery"}>
+          <GalleryPage />
+        </div>
+        {/* Apps and Settings reload each visit so they always show what's saved. */}
         {page === "apps" && <AppsPage />}
         {page === "settings" && <SettingsPage />}
       </main>

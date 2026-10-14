@@ -1,15 +1,16 @@
-//! A text model running on your own PC through an OpenAI-compatible server:
-//! LM Studio (http://127.0.0.1:1234) or Ollama (http://127.0.0.1:11434).
+//! Any OpenAI-compatible chat server: LM Studio (http://127.0.0.1:1234) or
+//! Ollama (http://127.0.0.1:11434) on this PC, or a remote one such as
+//! llama.cpp's llama-server (with or without --rpc), vLLM, or a hosted API.
 
 use super::error_text;
 use serde_json::{json, Value};
 
-pub async fn complete(client: &reqwest::Client, base_url: &str, model: &str, system: &str, user: &str) -> Result<String, String> {
+pub async fn complete(client: &reqwest::Client, base_url: &str, api_key: &str, model: &str, system: &str, user: &str) -> Result<String, String> {
   let base = base_url.trim().trim_end_matches('/');
   if base.is_empty() {
-    return Err("no local model server address is set".into());
+    return Err("no server address is set".into());
   }
-  let model = if model.trim().is_empty() { first_model(client, base).await? } else { model.trim().to_string() };
+  let model = if model.trim().is_empty() { first_model(client, base, api_key).await? } else { model.trim().to_string() };
   let body = json!({
     "model": model,
     "temperature": 0.7,
@@ -18,12 +19,11 @@ pub async fn complete(client: &reqwest::Client, base_url: &str, model: &str, sys
       { "role": "user", "content": user },
     ],
   });
-  let resp = client
-    .post(format!("{base}/v1/chat/completions"))
+  let resp = with_key(client.post(endpoint(base, "chat/completions")), api_key)
     .json(&body)
     .send()
     .await
-    .map_err(|e| format!("couldn't reach the local model at {base} (is LM Studio or Ollama running?): {e}"))?;
+    .map_err(|e| format!("couldn't reach the model server at {base} (is it running?): {e}"))?;
   let status = resp.status();
   let text = resp.text().await.map_err(|e| e.to_string())?;
   if !status.is_success() {
@@ -41,13 +41,12 @@ pub async fn complete(client: &reqwest::Client, base_url: &str, model: &str, sys
   Ok(strip_think_tags(&answer))
 }
 
-pub async fn list_models(client: &reqwest::Client, base_url: &str) -> Result<Vec<String>, String> {
+pub async fn list_models(client: &reqwest::Client, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
   let base = base_url.trim().trim_end_matches('/');
-  let resp = client
-    .get(format!("{base}/v1/models"))
+  let resp = with_key(client.get(endpoint(base, "models")), api_key)
     .send()
     .await
-    .map_err(|e| format!("Couldn't reach {base}. Is LM Studio or Ollama running? ({e})"))?;
+    .map_err(|e| format!("Couldn't reach {base}. Is the server running? ({e})"))?;
   let status = resp.status();
   let text = resp.text().await.map_err(|e| e.to_string())?;
   if !status.is_success() {
@@ -57,8 +56,19 @@ pub async fn list_models(client: &reqwest::Client, base_url: &str) -> Result<Vec
   Ok(model_ids(&value))
 }
 
-async fn first_model(client: &reqwest::Client, base: &str) -> Result<String, String> {
-  list_models(client, base)
+/// Servers are usually given as http://host:port, but some hosted APIs give a
+/// base that already ends in /v1 (or /openai), so only add /v1 when it's missing.
+fn endpoint(base: &str, path: &str) -> String {
+  let has_version = base.ends_with("/v1") || base.ends_with("/openai") || base.ends_with("/v1beta/openai");
+  if has_version { format!("{base}/{path}") } else { format!("{base}/v1/{path}") }
+}
+
+fn with_key(request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+  if api_key.trim().is_empty() { request } else { request.bearer_auth(api_key.trim()) }
+}
+
+async fn first_model(client: &reqwest::Client, base: &str, api_key: &str) -> Result<String, String> {
+  list_models(client, base, api_key)
     .await?
     .into_iter()
     .next()
@@ -91,6 +101,13 @@ mod tests {
   fn removes_reasoning_blocks() {
     assert_eq!(strip_think_tags("<think>hmm</think>\n{\"reply\":\"hi\"}"), "{\"reply\":\"hi\"}");
     assert_eq!(strip_think_tags("plain"), "plain");
+  }
+
+  #[test]
+  fn adds_v1_only_when_the_address_lacks_it() {
+    assert_eq!(endpoint("http://10.0.0.5:8080", "models"), "http://10.0.0.5:8080/v1/models");
+    assert_eq!(endpoint("https://api.example.com/v1", "chat/completions"), "https://api.example.com/v1/chat/completions");
+    assert_eq!(endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "models"), "https://generativelanguage.googleapis.com/v1beta/openai/models");
   }
 
   #[test]

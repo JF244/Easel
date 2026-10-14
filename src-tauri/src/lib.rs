@@ -37,6 +37,14 @@ impl AppState {
     self.settings.lock().map(|s| s.clone()).unwrap_or_default()
   }
 
+  /// Brain settings with the Gemini key copied in for the Gemini brain.
+  fn brain_settings(&self) -> settings::BrainSettings {
+    let settings = self.settings();
+    let mut brain = settings.brain;
+    brain.gemini_api_key = settings.gemini.api_key;
+    brain
+  }
+
   fn output_dir(&self) -> PathBuf {
     self.settings().output_dir(self.pictures_dir.clone())
   }
@@ -123,14 +131,12 @@ async fn generate(state: State<'_, AppState>, mut request: GenerateRequest) -> R
 
 #[tauri::command]
 async fn brain_plan(state: State<'_, AppState>, turns: Vec<ChatTurn>, context: PlannerContext) -> Result<Plan, String> {
-  let settings = state.settings();
-  brain::plan(&state.client, &settings.brain, &state.brain_dir, &turns, &context).await
+  brain::plan(&state.client, &state.brain_settings(), &state.brain_dir, &turns, &context).await
 }
 
 #[tauri::command]
 async fn brain_improve(state: State<'_, AppState>, prompt: String, editing: bool) -> Result<Improved, String> {
-  let settings = state.settings();
-  brain::improve(&state.client, &settings.brain, &state.brain_dir, &prompt, editing).await
+  brain::improve(&state.client, &state.brain_settings(), &state.brain_dir, &prompt, editing).await
 }
 
 #[tauri::command]
@@ -146,8 +152,13 @@ async fn comfy_checkpoints(state: State<'_, AppState>, url: String) -> Result<Ve
 }
 
 #[tauri::command]
-async fn local_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
-  local_llm::list_models(&state.client, &url).await
+async fn local_models(state: State<'_, AppState>, url: String, api_key: Option<String>) -> Result<Vec<String>, String> {
+  local_llm::list_models(&state.client, &url, api_key.as_deref().unwrap_or_default()).await
+}
+
+#[tauri::command]
+async fn gemini_text_models(state: State<'_, AppState>, api_key: String) -> Result<Vec<String>, String> {
+  gemini::list_text_models(&state.client, &api_key).await
 }
 
 #[tauri::command]
@@ -274,6 +285,7 @@ pub fn run() {
       gemini_models,
       comfy_checkpoints,
       local_models,
+      gemini_text_models,
       open_in_editor,
       apps_status,
       open_with_app,

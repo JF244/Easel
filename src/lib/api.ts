@@ -1,6 +1,17 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
-export type BrainKind = "claudeCli" | "agyCli" | "claudeApi" | "local";
+/** A brain: "claudeCli", "agyCli", "claudeApi", "gemini", "local", or "remote:<id>". */
+export type BrainKind = string;
+export type AdvisorMode = "off" | "onRequest" | "auto";
+export const FIXED_BRAINS = ["claudeCli", "agyCli", "claudeApi", "gemini", "local"] as const;
+
+export interface RemoteBrain {
+  id: string;
+  name: string;
+  url: string;
+  apiKey: string;
+  model: string;
+}
 export type ProviderId = "gemini" | "comfy" | "comfyWorkflow";
 
 export interface CustomWorkflow {
@@ -32,6 +43,10 @@ export interface Settings {
   };
   brain: {
     order: BrainKind[];
+    advisorOrder: BrainKind[];
+    advisorMode: AdvisorMode;
+    remotes: RemoteBrain[];
+    geminiModel: string;
     claudeCliPath: string;
     claudeCliModel: string;
     agyCliPath: string;
@@ -103,6 +118,8 @@ export interface PlannedJob {
 export interface Plan {
   reply: string;
   jobs: PlannedJob[];
+  advisor?: string | null;
+  advice?: string | null;
   brain: string;
   skipped: string[];
 }
@@ -131,12 +148,26 @@ export interface EditorResult {
   summary: string;
 }
 
-export const BRAIN_LABELS: Record<BrainKind, string> = {
+const BRAIN_LABELS: Record<string, string> = {
   claudeCli: "Claude Code (your Claude subscription)",
   agyCli: "Antigravity (your Google subscription)",
   claudeApi: "Claude API (your API key, pay per use)",
-  local: "Local model (LM Studio / Ollama)",
+  gemini: "Gemini, e.g. Gemini 4 / Argon (your Gemini API key)",
+  local: "Local model on this PC (LM Studio / Ollama)",
 };
+
+export function brainLabel(settings: Settings, kind: BrainKind): string {
+  if (kind.startsWith("remote:")) {
+    const remote = settings.brain.remotes.find((r) => `remote:${r.id}` === kind);
+    return remote ? `${remote.name || "Remote server"} (remote server)` : "Removed remote server";
+  }
+  return BRAIN_LABELS[kind] ?? kind;
+}
+
+/** Every brain you could turn on: the fixed ones plus your remote servers. */
+export function allBrains(settings: Settings): BrainKind[] {
+  return [...FIXED_BRAINS, ...settings.brain.remotes.map((r) => `remote:${r.id}`)];
+}
 
 export const ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"];
 
@@ -152,7 +183,8 @@ export const api = {
   brainImprove: (prompt: string, editing: boolean) => invoke<Improved>("brain_improve", { prompt, editing }),
   geminiModels: (apiKey: string) => invoke<string[]>("gemini_models", { apiKey }),
   comfyCheckpoints: (url: string) => invoke<string[]>("comfy_checkpoints", { url }),
-  localModels: (url: string) => invoke<string[]>("local_models", { url }),
+  localModels: (url: string, apiKey?: string) => invoke<string[]>("local_models", { url, apiKey: apiKey ?? null }),
+  geminiTextModels: (apiKey: string) => invoke<string[]>("gemini_text_models", { apiKey }),
   openInEditor: (path: string) => invoke<void>("open_in_editor", { path }),
   appsStatus: () => invoke<AppStatus[]>("apps_status"),
   openWithApp: (appId: string, path?: string) => invoke<void>("open_with_app", { appId, path: path ?? null }),

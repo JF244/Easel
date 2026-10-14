@@ -18,15 +18,43 @@ interface Message {
   text: string;
   brain?: string;
   skipped?: string[];
+  advisor?: string | null;
+  advice?: string | null;
   runs?: JobRun[];
 }
 
 const RECENT_IMAGES = 10;
-let nextMessageId = 1;
+const HISTORY_KEY = "easel.brainChat.v1";
+const HISTORY_LIMIT = 200;
+
+/** The chat is kept in this window's storage so it survives restarting Easel. */
+function loadHistory(): Message[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]") as Message[];
+    // A job can't still be running after a restart.
+    return saved.map((m) => ({
+      ...m,
+      runs: m.runs?.map((r) => (r.status === "running" ? { ...r, status: "failed", error: "Easel was closed before this finished." } : r)),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(messages: Message[]) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(messages.slice(-HISTORY_LIMIT)));
+  } catch {
+    // Storage full or blocked: the chat still works, it just won't survive a restart.
+  }
+}
+
+const initialHistory = loadHistory();
+let nextMessageId = initialHistory.reduce((max, m) => Math.max(max, m.id), 0) + 1;
 
 export default function BrainPage() {
   const { settings, gallery, apps, addToGallery, setPage } = useApp();
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(initialHistory);
   const [draft, setDraft] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
   const [thinking, setThinking] = useState(false);
@@ -35,6 +63,7 @@ export default function BrainPage() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    saveHistory(messages);
   }, [messages, thinking]);
 
   const buildContext = (): PlannerContext => {
@@ -116,7 +145,16 @@ export default function BrainPage() {
     try {
       const plan = await api.brainPlan(turns, context);
       const runs: JobRun[] = plan.jobs.map((job) => ({ job, status: "running", results: [] }));
-      const reply: Message = { id: nextMessageId++, role: "assistant", text: plan.reply || "Working on it.", brain: plan.brain, skipped: plan.skipped, runs };
+      const reply: Message = {
+        id: nextMessageId++,
+        role: "assistant",
+        text: plan.reply || "Working on it.",
+        brain: plan.brain,
+        skipped: plan.skipped,
+        advisor: plan.advisor,
+        advice: plan.advice,
+        runs,
+      };
       setMessages([...history, reply]);
       setAttached([]);
       setThinking(false);
@@ -140,7 +178,14 @@ export default function BrainPage() {
   return (
     <div className="mx-auto flex h-full max-w-4xl flex-col p-6">
       <header className="mb-4">
-        <h1 className="text-xl font-semibold">Brain</h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-xl font-semibold">Brain</h1>
+          {messages.length > 0 && (
+            <button type="button" className="btn h-8 text-xs" disabled={thinking} onClick={() => setMessages([])} title="Results stay in your gallery">
+              Start a new chat
+            </button>
+          )}
+        </div>
         <p className="text-sm text-ink-2">
           Say what you want made. The brain writes the prompts, picks Gemini or ComfyUI, and runs the jobs. If one brain is out of usage, the next one in Settings takes over.
         </p>
@@ -169,6 +214,12 @@ export default function BrainPage() {
                 <BrainNote brain={m.brain} skipped={m.skipped ?? []} />
               </div>
             )}
+            {m.advisor && (
+              <details className="mt-1 px-1 text-xs text-ink-3">
+                <summary className="cursor-pointer">{m.advice ? `Advised by ${m.advisor}` : `Planned by the advisor, ${m.advisor}`}</summary>
+                {m.advice && <p className="mt-1 whitespace-pre-wrap text-ink-2">{m.advice}</p>}
+              </details>
+            )}
             {m.runs?.map((run, j) => (
               <div key={j} className="mt-3 space-y-2">
                 <p className="text-xs text-ink-3">
@@ -196,7 +247,7 @@ export default function BrainPage() {
             id="brain-input"
             rows={2}
             className="field h-auto flex-1 py-2"
-            placeholder="Describe what you want…"
+            placeholder="Describe what you want… (start with /advisor to ask your frontier brain)"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {

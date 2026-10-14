@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, BRAIN_LABELS, errorMessage, type BrainKind, type CustomWorkflow, type Settings } from "../lib/api";
+import { allBrains, api, brainLabel, errorMessage, type AdvisorMode, type BrainKind, type CustomWorkflow, type Settings } from "../lib/api";
 import { useApp } from "../lib/store";
 import { ErrorNote } from "../components/ErrorNote";
 
-const ALL_BRAINS: BrainKind[] = ["claudeCli", "agyCli", "claudeApi", "local"];
 
 export default function SettingsPage() {
   const { settings, setSettings, refreshGallery } = useApp();
@@ -173,51 +172,87 @@ function ListLoader({ label, load, onPick, current }: { label: string; load: () 
   );
 }
 
+/** An ordered list of brains with move, turn-off and turn-on controls. */
+function BrainOrder({ draft, list, onChange, emptyText }: { draft: Settings; list: BrainKind[]; onChange: (next: BrainKind[]) => void; emptyText: string }) {
+  const off = allBrains(draft).filter((b) => !list.includes(b));
+  const move = (i: number, by: number) => {
+    const next = [...list];
+    const j = i + by;
+    if (j < 0 || j >= next.length) return;
+    [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+  return (
+    <div className="space-y-2">
+      <ol className="space-y-2">
+        {list.map((kind, i) => (
+          <li key={kind} className="flex items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+            <span className="w-5 text-ink-3">{i + 1}.</span>
+            <span className="flex-1">{brainLabel(draft, kind)}</span>
+            <button type="button" className="btn h-8 w-8 px-0" aria-label={`Move ${brainLabel(draft, kind)} up`} disabled={i === 0} onClick={() => move(i, -1)}>
+              ↑
+            </button>
+            <button type="button" className="btn h-8 w-8 px-0" aria-label={`Move ${brainLabel(draft, kind)} down`} disabled={i === list.length - 1} onClick={() => move(i, 1)}>
+              ↓
+            </button>
+            <button type="button" className="btn h-8 text-xs" onClick={() => onChange(list.filter((k) => k !== kind))}>
+              Turn off
+            </button>
+          </li>
+        ))}
+        {list.length === 0 && <li className="text-sm text-ink-2">{emptyText}</li>}
+      </ol>
+      {off.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {off.map((kind) => (
+            <button key={kind} type="button" className="btn h-8 text-xs" onClick={() => onChange([...list, kind])}>
+              Add: {brainLabel(draft, kind)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BrainSection({ draft, update }: SectionProps) {
-  const order = draft.brain.order;
-  const off = ALL_BRAINS.filter((b) => !order.includes(b));
-
-  const move = (kind: BrainKind, by: number) =>
-    update((s) => {
-      const list = s.brain.order;
-      const i = list.indexOf(kind);
-      const j = i + by;
-      if (j < 0 || j >= list.length) return;
-      [list[i], list[j]] = [list[j], list[i]];
-    });
-
   return (
     <Section
       title="Brain"
       intro="The brain plans jobs and writes prompts. Easel asks the first one on the list and moves down when one is missing, out of usage, or gives an unusable answer."
     >
-      <ol className="space-y-2">
-        {order.map((kind, i) => (
-          <li key={kind} className="flex items-center gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
-            <span className="w-5 text-ink-3">{i + 1}.</span>
-            <span className="flex-1">{BRAIN_LABELS[kind]}</span>
-            <button type="button" className="btn h-8 w-8 px-0" aria-label={`Move ${BRAIN_LABELS[kind]} up`} disabled={i === 0} onClick={() => move(kind, -1)}>
-              ↑
-            </button>
-            <button type="button" className="btn h-8 w-8 px-0" aria-label={`Move ${BRAIN_LABELS[kind]} down`} disabled={i === order.length - 1} onClick={() => move(kind, 1)}>
-              ↓
-            </button>
-            <button type="button" className="btn h-8 text-xs" onClick={() => update((s) => (s.brain.order = s.brain.order.filter((k) => k !== kind)))}>
-              Turn off
-            </button>
-          </li>
-        ))}
-        {order.length === 0 && <li className="text-sm text-danger">No brain is on. Turn one on below.</li>}
-      </ol>
-      {off.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {off.map((kind) => (
-            <button key={kind} type="button" className="btn h-8 text-xs" onClick={() => update((s) => s.brain.order.push(kind))}>
-              Turn on: {BRAIN_LABELS[kind]}
-            </button>
-          ))}
+      <div>
+        <h3 className="label">Primary brains, in order</h3>
+        <BrainOrder draft={draft} list={draft.brain.order} onChange={(next) => update((s) => (s.brain.order = next))} emptyText="No brain is on. Add one below." />
+      </div>
+
+      <div className="space-y-3 border-t border-line pt-4">
+        <div>
+          <h3 className="text-sm font-semibold">Advisor</h3>
+          <p className="text-sm text-ink-2">
+            A stronger, frontier brain your primary brain can lean on. Start a chat message with <code className="rounded bg-panel-2 px-1">/advisor</code> to send it
+            straight to the advisor.
+          </p>
         </div>
-      )}
+        <div className="max-w-sm">
+          <label className="label" htmlFor="advisor-mode">
+            When to ask the advisor
+          </label>
+          <select id="advisor-mode" className="field" value={draft.brain.advisorMode} onChange={(e) => update((s) => (s.brain.advisorMode = e.target.value as AdvisorMode))}>
+            <option value="off">Never</option>
+            <option value="onRequest">Only when I type /advisor</option>
+            <option value="auto">Also when the primary brain is unsure</option>
+          </select>
+        </div>
+        {draft.brain.advisorMode !== "off" && (
+          <div>
+            <h3 className="label">Advisor brains, in order</h3>
+            <BrainOrder draft={draft} list={draft.brain.advisorOrder} onChange={(next) => update((s) => (s.brain.advisorOrder = next))} emptyText="No advisor chosen. Add one below." />
+          </div>
+        )}
+      </div>
+
+      <RemoteServers draft={draft} update={update} />
 
       <div className="grid gap-4 border-t border-line pt-4 sm:grid-cols-2">
         <TextField
@@ -242,6 +277,19 @@ function BrainSection({ draft, update }: SectionProps) {
           onChange={(v) => update((s) => (s.brain.agyCliPath = v))}
           hint="“agy” if it's on your PATH, or its full path. Sign in once by running agy in a terminal."
         />
+        <div>
+          <TextField
+            id="gemini-brain-model"
+            label="Gemini brain model"
+            value={draft.brain.geminiModel}
+            placeholder="Empty picks the newest Pro model on your key"
+            onChange={(v) => update((s) => (s.brain.geminiModel = v))}
+            hint="Uses the Gemini API key from the Gemini section below."
+          />
+          <div className="mt-2">
+            <ListLoader label="Find Gemini text models" load={() => api.geminiTextModels(draft.gemini.apiKey)} current={draft.brain.geminiModel} onPick={(v) => update((s) => (s.brain.geminiModel = v))} />
+          </div>
+        </div>
         <TextField
           id="claude-api-model"
           label="Claude API model"
@@ -249,38 +297,82 @@ function BrainSection({ draft, update }: SectionProps) {
           onChange={(v) => update((s) => (s.brain.claudeApiModel = v))}
           hint="claude-opus-5-5 by default. claude-haiku-5-5 is much cheaper for prompt writing."
         />
-        <div className="sm:col-span-2">
-          <TextField
-            id="claude-api-key"
-            label="Claude API key (only for the Claude API brain)"
-            secret
-            value={draft.brain.claudeApiKey}
-            placeholder="sk-ant-…"
-            onChange={(v) => update((s) => (s.brain.claudeApiKey = v))}
-            hint="From console.anthropic.com. This is billed per use and is separate from a Claude Pro or Max subscription."
-          />
-        </div>
+        <TextField
+          id="claude-api-key"
+          label="Claude API key (only for the Claude API brain)"
+          secret
+          value={draft.brain.claudeApiKey}
+          placeholder="sk-ant-…"
+          onChange={(v) => update((s) => (s.brain.claudeApiKey = v))}
+          hint="From console.anthropic.com. Billed per use, separate from a Claude Pro or Max subscription."
+        />
         <TextField
           id="local-url"
-          label="Local model server"
+          label="Local model server (this PC)"
           value={draft.brain.localUrl}
           onChange={(v) => update((s) => (s.brain.localUrl = v))}
           hint="LM Studio: http://127.0.0.1:1234 · Ollama: http://127.0.0.1:11434"
         />
         <div>
-          <TextField
-            id="local-model"
-            label="Local model"
-            value={draft.brain.localModel}
-            placeholder="Empty uses the first loaded model"
-            onChange={(v) => update((s) => (s.brain.localModel = v))}
-          />
+          <TextField id="local-model" label="Local model" value={draft.brain.localModel} placeholder="Empty uses the first loaded model" onChange={(v) => update((s) => (s.brain.localModel = v))} />
           <div className="mt-2">
             <ListLoader label="Find loaded models" load={() => api.localModels(draft.brain.localUrl)} current={draft.brain.localModel} onPick={(v) => update((s) => (s.brain.localModel = v))} />
           </div>
         </div>
       </div>
     </Section>
+  );
+}
+
+function RemoteServers({ draft, update }: SectionProps) {
+  const add = () =>
+    update((s) =>
+      s.brain.remotes.push({ id: `r${Date.now().toString(36)}`, name: "", url: "", apiKey: "", model: "" }),
+    );
+  const remove = (id: string) =>
+    update((s) => {
+      s.brain.remotes = s.brain.remotes.filter((r) => r.id !== id);
+      s.brain.order = s.brain.order.filter((k) => k !== `remote:${id}`);
+      s.brain.advisorOrder = s.brain.advisorOrder.filter((k) => k !== `remote:${id}`);
+    });
+  return (
+    <div className="space-y-3 border-t border-line pt-4">
+      <div>
+        <h3 className="text-sm font-semibold">Remote servers</h3>
+        <p className="text-sm text-ink-2">
+          Any OpenAI-compatible server on another machine or online: llama.cpp's llama-server (including one pooling GPUs with <code className="rounded bg-panel-2 px-1">--rpc</code>), vLLM,
+          LM Studio or Ollama on another PC, or a hosted API with a key. Add one, then put it in the primary or advisor list above.
+        </p>
+      </div>
+      {draft.brain.remotes.map((r, i) => (
+        <div key={r.id} className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2">
+          <TextField id={`remote-name-${r.id}`} label="Name" value={r.name} placeholder="LAN box" onChange={(v) => update((s) => (s.brain.remotes[i].name = v))} />
+          <TextField
+            id={`remote-url-${r.id}`}
+            label="Address"
+            value={r.url}
+            placeholder="http://192.168.1.20:8080"
+            onChange={(v) => update((s) => (s.brain.remotes[i].url = v))}
+            hint="Easel adds /v1 unless the address already ends in /v1."
+          />
+          <TextField id={`remote-key-${r.id}`} label="API key (if the server needs one)" secret value={r.apiKey} onChange={(v) => update((s) => (s.brain.remotes[i].apiKey = v))} />
+          <div>
+            <TextField id={`remote-model-${r.id}`} label="Model" value={r.model} placeholder="Empty uses the first model it lists" onChange={(v) => update((s) => (s.brain.remotes[i].model = v))} />
+            <div className="mt-2">
+              <ListLoader label="Find models" load={() => api.localModels(r.url, r.apiKey)} current={r.model} onPick={(v) => update((s) => (s.brain.remotes[i].model = v))} />
+            </div>
+          </div>
+          <div className="sm:col-span-2">
+            <button type="button" className="btn btn-danger h-8 text-xs" onClick={() => remove(r.id)}>
+              Remove this server
+            </button>
+          </div>
+        </div>
+      ))}
+      <button type="button" className="btn h-8 text-xs" onClick={add}>
+        Add a remote server
+      </button>
+    </div>
   );
 }
 

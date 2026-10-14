@@ -6,10 +6,20 @@ tracking. Everything you make is saved as normal files in `Pictures/Easel`.
 - **Brain:** describe what you want; the brain writes the prompts, picks an
   engine and runs the jobs. Brains are tried in your order, and the next one
   takes over when one is missing or out of usage:
-  1. **Claude Code** (`claude -p`), on your Claude subscription
-  2. **Antigravity** (`agy -p`), on your Google subscription
-  3. **Claude API**, with your own API key (pay per use)
-  4. **Local model**: LM Studio or Ollama on your own GPU
+  - **Claude Code** (`claude -p`), on your Claude subscription
+  - **Antigravity** (`agy -p`), on your Google subscription
+  - **Gemini** (for example Gemini 4 / Argon), with your Gemini API key
+  - **Claude API**, with your own API key (pay per use)
+  - **Local model**: LM Studio or Ollama on this PC
+  - **Remote servers**: any OpenAI-compatible endpoint, such as llama.cpp's
+    `llama-server` (including one pooling GPUs across machines with `--rpc`),
+    vLLM, LM Studio or Ollama on another PC, or a hosted API with a key
+- **Advisor:** a second list of frontier brains (Claude, Gemini 4…) that a
+  cheaper primary brain can lean on. Start a chat message with `/advisor` to
+  send it straight to the advisor, or set the advisor to "auto" so the
+  primary brain asks it when it's unsure and then plans with the advice.
+- **History:** the brain chat is saved and survives switching tabs and
+  restarting Easel; Create, Edit and Gallery keep their state across tabs.
 - **Create:** prompt to image with Gemini (Nano Banana) or ComfyUI.
 - **Edit:** change an image by prompt, or paint over an area to redo just that part.
 - **Gallery:** browse, search prompts, edit, open in PhotoCraft, delete.

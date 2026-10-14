@@ -4,8 +4,8 @@
 //! brain answered and why the earlier ones were skipped.
 
 use crate::providers::cli::{self, CliCall, PLANNING_TIME_LIMIT};
-use crate::providers::{claude, local_llm};
-use crate::settings::{BrainKind, BrainSettings};
+use crate::providers::{claude, gemini, local_llm};
+use crate::settings::{AdvisorMode, BrainKind, BrainSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -39,6 +39,17 @@ Rules:
 - To change an existing image, set inputImage to its path, copied exactly from the list. Never invent paths.
 - count is 1 to 4. Use more than one job only when the person asks for different images.
 - If the request is a question, answer it in "reply" and return an empty jobs list."#;
+
+/// Added to the planner's instructions when the advisor can be asked automatically.
+const ASK_ADVISOR_RULE: &str = r#"
+- If the request is complex or you're unsure how to plan it well, you may instead reply with
+  {"reply": "", "jobs": [], "askAdvisor": "one precise question for a stronger model"}.
+  You'll get its advice and then plan again. Don't ask for simple requests."#;
+
+const ADVISOR_SYSTEM: &str = "You advise a smaller model that plans image jobs inside Easel, a desktop image app. \
+It can generate pictures with Gemini or ComfyUI and make exact edits with editor apps. Answer its question with \
+concrete guidance: which engine or app to use, how to word the prompts, and the steps in order. \
+Plain text, under 200 words.";
 
 const IMPROVE_SYSTEM: &str = "You rewrite prompts for an image generation model. Keep the person's intent, \
 subject and any quoted text exactly. Add concrete visual detail: setting, composition, lighting, style, lens. \
@@ -104,7 +115,20 @@ pub struct Plan {
   pub brain: String,
   /// Brains that were tried first and why they were skipped.
   pub skipped: Vec<String>,
+  /// The frontier brain that advised, when one did.
+  pub advisor: Option<String>,
+  /// What the advisor said, shown under the reply.
+  pub advice: Option<String>,
 }
+
+struct ParsedPlan {
+  reply: String,
+  jobs: Vec<PlannedJob>,
+  ask_advisor: Option<String>,
+}
+
+/// Messages starting with this go straight to the advisor.
+const ADVISOR_COMMAND: &str = "/advisor";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,15 +139,117 @@ pub struct Improved {
 }
 
 pub async fn plan(client: &reqwest::Client, settings: &BrainSettings, work_dir: &Path, turns: &[ChatTurn], context: &PlannerContext) -> Result<Plan, String> {
+  // "/advisor make me a…" sends this turn to the frontier advisor directly.
+  if let Some(request) = turns.last().filter(|t| t.role == "user").and_then(|t| strip_advisor_command(&t.text)) {
+    if settings.advisor_mode == AdvisorMode::Off || settings.advisor_order.is_empty() {
+      return Err("The advisor is turned off. Choose advisor brains in Settings > Brain.".into());
+    }
+    let mut turns = turns.to_vec();
+    if let Some(last) = turns.last_mut() {
+      last.text = request;
+    }
+    let user = planner_message(&turns, context);
+    let (mut plan, _) = plan_with(client, settings, work_dir, &settings.advisor_order, PLANNER_SYSTEM, &user).await?;
+    plan.advisor = Some(plan.brain.clone());
+    return Ok(plan);
+  }
+
+  let auto = settings.advisor_mode == AdvisorMode::Auto && !settings.advisor_order.is_empty();
+  let system = if auto { format!("{PLANNER_SYSTEM}{ASK_ADVISOR_RULE}") } else { PLANNER_SYSTEM.to_string() };
   let user = planner_message(turns, context);
+  let (plan, parsed) = plan_with(client, settings, work_dir, &settings.order, &system, &user).await?;
+  let question = match parsed.ask_advisor {
+    Some(q) if auto => q,
+    _ => return Ok(plan),
+  };
+
+  // The primary brain asked for help: get advice, then let the same brain plan again.
+  let primary = plan.brain.clone();
+  let mut skipped = plan.skipped.clone();
+  let advisor_question = format!("{user}\n\nThe planner's question: {question}");
+  let (advice, advisor) = match first_answer(client, settings, work_dir, &settings.advisor_order, ADVISOR_SYSTEM, &advisor_question).await {
+    Ok((text, name, mut also_skipped)) => {
+      skipped.append(&mut also_skipped);
+      (Some(text), Some(name))
+    }
+    Err(err) => {
+      skipped.push(format!("advisor: {err}"));
+      (None, None)
+    }
+  };
+  let follow_up = match (&advice, &advisor) {
+    (Some(text), Some(name)) => format!("{user}\n\nAdvice from {name}: {text}\n\nNow reply with the JSON plan; don't ask again."),
+    _ => format!("{user}\n\nNo advisor was available. Decide yourself and reply with the JSON plan."),
+  };
+  let kind = settings.order.iter().find(|k| label(settings, k) == primary).cloned();
+  let order: Vec<BrainKind> = kind.into_iter().chain(settings.order.iter().cloned()).collect();
+  let (mut final_plan, _) = plan_with(client, settings, work_dir, &order, PLANNER_SYSTEM, &follow_up).await?;
+  skipped.append(&mut final_plan.skipped);
+  final_plan.skipped = skipped;
+  final_plan.advisor = advisor;
+  final_plan.advice = advice;
+  Ok(final_plan)
+}
+
+/// Tries brains in order until one returns a usable plan.
+async fn plan_with(
+  client: &reqwest::Client,
+  settings: &BrainSettings,
+  work_dir: &Path,
+  order: &[BrainKind],
+  system: &str,
+  user: &str,
+) -> Result<(Plan, ParsedPlan), String> {
   let mut skipped = Vec::new();
-  for kind in brains_in_order(settings) {
-    match ask(client, settings, work_dir, kind, PLANNER_SYSTEM, &user).await.and_then(|text| parse_plan(&text)) {
-      Ok((reply, jobs)) => return Ok(Plan { reply, jobs, brain: label(kind).into(), skipped }),
-      Err(err) => skipped.push(format!("{}: {err}", label(kind))),
+  for kind in dedup(order) {
+    let name = label(settings, &kind);
+    match ask(client, settings, work_dir, &kind, system, user).await.and_then(|text| parse_plan(&text)) {
+      Ok(parsed) => {
+        let plan = Plan {
+          reply: parsed.reply.clone(),
+          jobs: parsed.jobs.clone(),
+          brain: name,
+          skipped,
+          advisor: None,
+          advice: None,
+        };
+        return Ok((plan, parsed));
+      }
+      Err(err) => skipped.push(format!("{name}: {err}")),
     }
   }
   Err(no_brain_message(&skipped))
+}
+
+/// Tries brains in order until one gives any non-empty text answer.
+async fn first_answer(
+  client: &reqwest::Client,
+  settings: &BrainSettings,
+  work_dir: &Path,
+  order: &[BrainKind],
+  system: &str,
+  user: &str,
+) -> Result<(String, String, Vec<String>), String> {
+  let mut skipped = Vec::new();
+  for kind in dedup(order) {
+    let name = label(settings, &kind);
+    match ask(client, settings, work_dir, &kind, system, user).await {
+      Ok(text) if !clean_single_answer(&text).is_empty() => return Ok((clean_single_answer(&text), name, skipped)),
+      Ok(_) => skipped.push(format!("{name}: empty answer")),
+      Err(err) => skipped.push(format!("{name}: {err}")),
+    }
+  }
+  Err(no_brain_message(&skipped))
+}
+
+fn strip_advisor_command(text: &str) -> Option<String> {
+  let trimmed = text.trim_start();
+  let rest = trimmed.strip_prefix(ADVISOR_COMMAND)?;
+  // "/advisors" or "/advisorX" isn't the command.
+  if rest.chars().next().is_some_and(|c| !c.is_whitespace()) {
+    return None;
+  }
+  Some(rest.trim().to_string())
 }
 
 pub async fn improve(client: &reqwest::Client, settings: &BrainSettings, work_dir: &Path, prompt: &str, editing: bool) -> Result<Improved, String> {
@@ -131,27 +257,20 @@ pub async fn improve(client: &reqwest::Client, settings: &BrainSettings, work_di
     return Err("Type a prompt first, then the brain can improve it.".into());
   }
   let system = if editing { IMPROVE_EDIT_SYSTEM } else { IMPROVE_SYSTEM };
-  let mut skipped = Vec::new();
-  for kind in brains_in_order(settings) {
-    match ask(client, settings, work_dir, kind, system, prompt.trim()).await {
-      Ok(text) => {
-        let cleaned = clean_single_answer(&text);
-        if !cleaned.is_empty() {
-          return Ok(Improved { prompt: cleaned, brain: label(kind).into(), skipped });
-        }
-        skipped.push(format!("{}: empty answer", label(kind)));
-      }
-      Err(err) => skipped.push(format!("{}: {err}", label(kind))),
-    }
-  }
-  Err(no_brain_message(&skipped))
+  let (prompt, brain, skipped) = first_answer(client, settings, work_dir, &settings.order, system, prompt.trim()).await?;
+  Ok(Improved { prompt, brain, skipped })
 }
 
 /// Sends one question to one brain.
-async fn ask(client: &reqwest::Client, s: &BrainSettings, work_dir: &Path, kind: BrainKind, system: &str, user: &str) -> Result<String, String> {
+async fn ask(client: &reqwest::Client, s: &BrainSettings, work_dir: &Path, kind: &BrainKind, system: &str, user: &str) -> Result<String, String> {
   match kind {
     BrainKind::ClaudeApi => claude::complete(client, &s.claude_api_key, &s.claude_api_model, system, user).await,
-    BrainKind::Local => local_llm::complete(client, &s.local_url, &s.local_model, system, user).await,
+    BrainKind::Gemini => gemini::complete(client, &s.gemini_api_key, &s.gemini_model, system, user).await,
+    BrainKind::Local => local_llm::complete(client, &s.local_url, "", &s.local_model, system, user).await,
+    BrainKind::Remote(id) => {
+      let remote = s.remotes.iter().find(|r| &r.id == id).ok_or("this remote server was removed in Settings")?;
+      local_llm::complete(client, &remote.url, &remote.api_key, &remote.model, system, user).await
+    }
     BrainKind::ClaudeCli => {
       let mut options = vec!["--output-format".into(), "text".into(), "--append-system-prompt".into(), system.into()];
       if !s.claude_cli_model.trim().is_empty() {
@@ -169,22 +288,29 @@ async fn ask(client: &reqwest::Client, s: &BrainSettings, work_dir: &Path, kind:
   }
 }
 
-fn brains_in_order(settings: &BrainSettings) -> Vec<BrainKind> {
-  let mut order = Vec::new();
-  for kind in &settings.order {
-    if !order.contains(kind) {
-      order.push(*kind);
+fn dedup(order: &[BrainKind]) -> Vec<BrainKind> {
+  let mut out: Vec<BrainKind> = Vec::new();
+  for kind in order {
+    if !out.contains(kind) {
+      out.push(kind.clone());
     }
   }
-  order
+  out
 }
 
-pub fn label(kind: BrainKind) -> &'static str {
+pub fn label(settings: &BrainSettings, kind: &BrainKind) -> String {
   match kind {
-    BrainKind::ClaudeCli => "Claude Code",
-    BrainKind::AgyCli => "Antigravity",
-    BrainKind::ClaudeApi => "Claude API",
-    BrainKind::Local => "Local model",
+    BrainKind::ClaudeCli => "Claude Code".into(),
+    BrainKind::AgyCli => "Antigravity".into(),
+    BrainKind::ClaudeApi => "Claude API".into(),
+    BrainKind::Gemini => "Gemini".into(),
+    BrainKind::Local => "Local model".into(),
+    BrainKind::Remote(id) => settings
+      .remotes
+      .iter()
+      .find(|r| &r.id == id)
+      .map(|r| if r.name.trim().is_empty() { "Remote server".to_string() } else { r.name.trim().to_string() })
+      .unwrap_or_else(|| "Remote server".into()),
   }
 }
 
@@ -233,7 +359,7 @@ fn planner_message(turns: &[ChatTurn], context: &PlannerContext) -> String {
 }
 
 /// Pulls the JSON object out of a reply, tolerating code fences or chatter around it.
-fn parse_plan(text: &str) -> Result<(String, Vec<PlannedJob>), String> {
+fn parse_plan(text: &str) -> Result<ParsedPlan, String> {
   let json = extract_json_object(text).ok_or("didn't answer in the expected format")?;
   let value: Value = serde_json::from_str(json).map_err(|_| "answered with broken JSON".to_string())?;
   let reply = value.get("reply").and_then(Value::as_str).unwrap_or_default().trim().to_string();
@@ -251,10 +377,11 @@ fn parse_plan(text: &str) -> Result<(String, Vec<PlannedJob>), String> {
     })
     .take(6)
     .collect();
-  if reply.is_empty() && jobs.is_empty() {
+  let ask_advisor = value.get("askAdvisor").and_then(Value::as_str).map(str::trim).filter(|q| !q.is_empty()).map(str::to_string);
+  if reply.is_empty() && jobs.is_empty() && ask_advisor.is_none() {
     return Err("gave an empty plan".into());
   }
-  Ok((reply, jobs))
+  Ok(ParsedPlan { reply, jobs, ask_advisor })
 }
 
 fn extract_json_object(text: &str) -> Option<&str> {
@@ -275,7 +402,7 @@ mod tests {
   #[test]
   fn parses_a_plan_inside_code_fences() {
     let text = "Sure!\n```json\n{\"reply\":\"Making two covers.\",\"jobs\":[{\"engine\":\"Gemini\",\"prompt\":\"a red hard hat\",\"count\":9}]}\n```";
-    let (reply, jobs) = parse_plan(text).unwrap();
+    let ParsedPlan { reply, jobs, .. } = parse_plan(text).unwrap();
     assert_eq!(reply, "Making two covers.");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].engine, "gemini");
@@ -284,7 +411,7 @@ mod tests {
 
   #[test]
   fn a_question_needs_no_jobs() {
-    let (reply, jobs) = parse_plan(r#"{"reply":"Which style?","jobs":[]}"#).unwrap();
+    let ParsedPlan { reply, jobs, .. } = parse_plan(r#"{"reply":"Which style?","jobs":[]}"#).unwrap();
     assert_eq!(reply, "Which style?");
     assert!(jobs.is_empty());
   }
@@ -297,8 +424,8 @@ mod tests {
 
   #[test]
   fn duplicate_brains_are_tried_once() {
-    let s = BrainSettings { order: vec![BrainKind::Local, BrainKind::ClaudeCli, BrainKind::Local], ..Default::default() };
-    assert_eq!(brains_in_order(&s), vec![BrainKind::Local, BrainKind::ClaudeCli]);
+    let order = vec![BrainKind::Local, BrainKind::ClaudeCli, BrainKind::Local];
+    assert_eq!(dedup(&order), vec![BrainKind::Local, BrainKind::ClaudeCli]);
   }
 
   #[test]
@@ -317,6 +444,56 @@ mod tests {
     assert!(msg.contains("Person: make it night"));
   }
 
+  #[test]
+  fn advisor_command_is_recognised_only_on_its_own() {
+    assert_eq!(strip_advisor_command("/advisor plan a 3-part series").as_deref(), Some("plan a 3-part series"));
+    assert_eq!(strip_advisor_command("  /advisor").as_deref(), Some(""));
+    assert!(strip_advisor_command("/advisors are great").is_none());
+    assert!(strip_advisor_command("ask the /advisor").is_none());
+  }
+
+  #[test]
+  fn a_plan_may_be_just_a_question_for_the_advisor() {
+    let parsed = parse_plan(r#"{"reply":"","jobs":[],"askAdvisor":"Which engine keeps exact text?"}"#).unwrap();
+    assert_eq!(parsed.ask_advisor.as_deref(), Some("Which engine keeps exact text?"));
+  }
+
+  #[tokio::test]
+  async fn auto_mode_gets_advice_then_the_primary_plans_with_it() {
+    let base = stand_in_server();
+    let s = BrainSettings {
+      order: vec![BrainKind::Remote("p".into())],
+      advisor_order: vec![BrainKind::Remote("a".into())],
+      advisor_mode: AdvisorMode::Auto,
+      remotes: vec![remote("p", "LAN box", &base, "primary"), remote("a", "Gemini 4", &base, "advisor")],
+      ..Default::default()
+    };
+    let turns = vec![ChatTurn { role: "user".into(), text: "a poster with exact text".into() }];
+    let plan = plan(&reqwest::Client::new(), &s, Path::new("."), &turns, &PlannerContext::default()).await.unwrap();
+    assert_eq!(plan.brain, "LAN box");
+    assert_eq!(plan.advisor.as_deref(), Some("Gemini 4"));
+    assert_eq!(plan.advice.as_deref(), Some("Use the editor for exact text."));
+    assert_eq!(plan.jobs.len(), 1);
+    assert_eq!(plan.jobs[0].prompt, "poster, planned with advice");
+  }
+
+  #[tokio::test]
+  async fn advisor_command_goes_straight_to_the_advisor() {
+    let base = stand_in_server();
+    let s = BrainSettings {
+      order: vec![BrainKind::Remote("p".into())],
+      advisor_order: vec![BrainKind::Remote("a".into())],
+      advisor_mode: AdvisorMode::OnRequest,
+      remotes: vec![remote("p", "LAN box", &base, "primary"), remote("a", "Gemini 4", &base, "advisor")],
+      ..Default::default()
+    };
+    let turns = vec![ChatTurn { role: "user".into(), text: "/advisor plan a course cover".into() }];
+    let plan = plan(&reqwest::Client::new(), &s, Path::new("."), &turns, &PlannerContext::default()).await.unwrap();
+    assert_eq!(plan.brain, "Gemini 4");
+    assert_eq!(plan.advisor.as_deref(), Some("Gemini 4"));
+    assert_eq!(plan.reply, "Advisor planned it.");
+  }
+
   #[tokio::test]
   async fn falls_through_to_the_next_brain_and_reports_why() {
     let s = BrainSettings {
@@ -330,5 +507,51 @@ mod tests {
     let err = improve(&client, &s, &dir, "a cat", false).await.unwrap_err();
     assert!(err.contains("Claude Code: Claude Code isn't installed"), "{err}");
     assert!(err.contains("Claude API: no Claude API key is set"), "{err}");
+  }
+
+  fn remote(id: &str, name: &str, url: &str, model: &str) -> crate::settings::RemoteBrain {
+    crate::settings::RemoteBrain { id: id.into(), name: name.into(), url: url.into(), api_key: "test-key".into(), model: model.into() }
+  }
+
+  /// A tiny OpenAI-compatible server. The "primary" model first asks for advice,
+  /// then plans once the advice is in its prompt; the "advisor" model answers
+  /// questions, or plans when asked directly.
+  fn stand_in_server() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+      for stream in listener.incoming().flatten() {
+        let mut stream = stream;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        // Read headers, then the body by Content-Length.
+        let body = loop {
+          let n = stream.read(&mut chunk).unwrap_or(0);
+          if n == 0 { break String::new(); }
+          buf.extend_from_slice(&chunk[..n]);
+          let text = String::from_utf8_lossy(&buf).to_string();
+          if let Some(end) = text.find("\r\n\r\n") {
+            let len = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+            if buf.len() >= end + 4 + len { break text[end + 4..].to_string(); }
+          }
+        };
+        let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let model = request["model"].as_str().unwrap_or_default();
+        let system = request["messages"][0]["content"].as_str().unwrap_or_default();
+        let user = request["messages"][1]["content"].as_str().unwrap_or_default();
+        let answer = match model {
+          "advisor" if system.starts_with("You advise") => "Use the editor for exact text.".to_string(),
+          "advisor" => r#"{"reply":"Advisor planned it.","jobs":[]}"#.to_string(),
+          _ if user.contains("Advice from Gemini 4: Use the editor for exact text.") => {
+            r#"{"reply":"Done.","jobs":[{"engine":"gemini","prompt":"poster, planned with advice"}]}"#.to_string()
+          }
+          _ => r#"{"reply":"","jobs":[],"askAdvisor":"How do I keep text exact?"}"#.to_string(),
+        };
+        let payload = serde_json::json!({ "choices": [{ "message": { "content": answer } }] }).to_string();
+        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload);
+      }
+    });
+    format!("http://{addr}")
   }
 }

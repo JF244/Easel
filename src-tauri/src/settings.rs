@@ -62,8 +62,10 @@ pub struct CustomWorkflow {
 
 /// The "brain" plans jobs and writes prompts. Easel tries each brain in
 /// `order` and moves to the next when one fails or is out of usage.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+/// Stored as plain names ("claudeCli", "remote:lan-box") so remote servers
+/// can be added freely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum BrainKind {
   /// Claude Code in print mode (`claude -p`): uses your Claude subscription.
   ClaudeCli,
@@ -71,20 +73,60 @@ pub enum BrainKind {
   AgyCli,
   /// The Anthropic API with your own key: pay per use.
   ClaudeApi,
+  /// Gemini (for example Gemini 4) with the same API key as the image models.
+  Gemini,
   /// LM Studio, Ollama or any OpenAI-compatible server on your PC.
   Local,
+  /// One of your remote servers, by its id.
+  Remote(String),
+}
+
+/// Any OpenAI-compatible endpoint on another machine or online: llama.cpp's
+/// llama-server (including one pooling GPUs with --rpc), vLLM, LM Studio or
+/// Ollama on another PC, or a hosted API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RemoteBrain {
+  pub id: String,
+  pub name: String,
+  pub url: String,
+  pub api_key: String,
+  pub model: String,
+}
+
+/// When the advisor (a stronger, frontier model) is asked.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AdvisorMode {
+  /// Never.
+  Off,
+  /// Only when you start a message with /advisor.
+  OnRequest,
+  /// Also when the primary brain says it's unsure.
+  Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BrainSettings {
+  #[serde(deserialize_with = "lenient_brains")]
   pub order: Vec<BrainKind>,
+  /// Frontier brains asked for advice, tried in this order.
+  #[serde(deserialize_with = "lenient_brains")]
+  pub advisor_order: Vec<BrainKind>,
+  pub advisor_mode: AdvisorMode,
+  pub remotes: Vec<RemoteBrain>,
   pub claude_cli_path: String,
   /// Optional model for Claude Code, e.g. "opus" or "sonnet". Empty uses its default.
   pub claude_cli_model: String,
   pub agy_cli_path: String,
   pub claude_api_key: String,
   pub claude_api_model: String,
+  /// Gemini text model for the Gemini brain. Empty picks the newest Pro model your key lists.
+  pub gemini_model: String,
+  /// Filled in at run time from the Gemini section, so the key is stored once.
+  #[serde(skip)]
+  pub gemini_api_key: String,
   /// Any OpenAI-compatible server: LM Studio (port 1234) or Ollama (port 11434).
   pub local_url: String,
   pub local_model: String,
@@ -129,15 +171,57 @@ impl Default for BrainSettings {
   fn default() -> Self {
     Self {
       order: vec![BrainKind::ClaudeCli, BrainKind::Local],
+      advisor_order: vec![BrainKind::ClaudeCli],
+      advisor_mode: AdvisorMode::OnRequest,
+      remotes: Vec::new(),
       claude_cli_path: DEFAULT_CLAUDE_CLI.into(),
       claude_cli_model: String::new(),
       agy_cli_path: DEFAULT_AGY_CLI.into(),
       claude_api_key: String::new(),
       claude_api_model: DEFAULT_CLAUDE_MODEL.into(),
+      gemini_model: String::new(),
+      gemini_api_key: String::new(),
       local_url: DEFAULT_LOCAL_LLM_URL.into(),
       local_model: String::new(),
     }
   }
+}
+
+impl TryFrom<String> for BrainKind {
+  type Error = String;
+
+  fn try_from(name: String) -> Result<Self, Self::Error> {
+    match name.as_str() {
+      "claudeCli" => Ok(BrainKind::ClaudeCli),
+      "agyCli" => Ok(BrainKind::AgyCli),
+      "claudeApi" => Ok(BrainKind::ClaudeApi),
+      "gemini" => Ok(BrainKind::Gemini),
+      "local" => Ok(BrainKind::Local),
+      other => match other.strip_prefix("remote:") {
+        Some(id) if !id.is_empty() => Ok(BrainKind::Remote(id.to_string())),
+        _ => Err(format!("unknown brain \"{other}\"")),
+      },
+    }
+  }
+}
+
+impl From<BrainKind> for String {
+  fn from(kind: BrainKind) -> String {
+    match kind {
+      BrainKind::ClaudeCli => "claudeCli".into(),
+      BrainKind::AgyCli => "agyCli".into(),
+      BrainKind::ClaudeApi => "claudeApi".into(),
+      BrainKind::Gemini => "gemini".into(),
+      BrainKind::Local => "local".into(),
+      BrainKind::Remote(id) => format!("remote:{id}"),
+    }
+  }
+}
+
+/// Skips brains this version doesn't know instead of throwing away all settings.
+fn lenient_brains<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<BrainKind>, D::Error> {
+  let names: Vec<String> = Deserialize::deserialize(deserializer)?;
+  Ok(names.into_iter().filter_map(|n| BrainKind::try_from(n).ok()).collect())
 }
 
 impl Settings {
@@ -199,6 +283,16 @@ mod tests {
     assert_eq!(s.gemini.image_model, DEFAULT_GEMINI_IMAGE_MODEL);
     assert_eq!(s.comfy.url, DEFAULT_COMFY_URL);
     assert_eq!(s.brain.order, vec![BrainKind::ClaudeCli, BrainKind::Local]);
+  }
+
+  #[test]
+  fn brains_round_trip_as_plain_names_and_unknown_ones_are_skipped() {
+    let s: Settings = serde_json::from_str(r#"{"brain":{"order":["remote:lan","futureBrain","local"],"advisorOrder":["claudeApi"]}}"#).unwrap();
+    assert_eq!(s.brain.order, vec![BrainKind::Remote("lan".into()), BrainKind::Local]);
+    assert_eq!(s.brain.advisor_order, vec![BrainKind::ClaudeApi]);
+    let json = serde_json::to_value(&s.brain).unwrap();
+    assert_eq!(json["order"], serde_json::json!(["remote:lan", "local"]));
+    assert_eq!(json["advisorMode"], "onRequest");
   }
 
   #[test]
