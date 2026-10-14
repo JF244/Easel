@@ -161,7 +161,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $server = "$env:RUNNER_TEMP\amd-suite\llama.cpp\llama-server.exe"
           if (-not (Test-Path $server)) { throw "llama-server.exe not installed" }
-          & $server --version 2>&1 | Select-Object -First 3 | Write-Host
+          # llama-server prints its version on stderr; PowerShell 5.1 would call that an error.
+          $ErrorActionPreference = "Continue"
+          $version = (& $server --version 2>&1 | ForEach-Object { "$_" }) -join " "
+          if ($version -notmatch "build \d+") { throw "llama-server.exe didn't report a version: $version" }
+          Write-Host $version
           Write-Host "AMD Windows install: llama.cpp Vulkan build is in place."
 
       - uses: actions/upload-artifact@v4
