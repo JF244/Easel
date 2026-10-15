@@ -4,7 +4,7 @@
 //! all-in-one). Anything else, including local video, runs as your own
 //! workflow exported with "Save (API Format)".
 
-use super::{decode_image, error_text, random_seed, GenerateRequest, Output};
+use super::{blank, decode_image, error_text, random_seed, GenerateRequest, Output};
 use crate::settings::{ComfySettings, CustomWorkflow};
 use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant};
@@ -31,6 +31,8 @@ pub async fn generate(client: &reqwest::Client, settings: &ComfySettings, req: &
     Some(mask) => Some(upload(client, &base, mask, "easel-mask.png").await?),
     None => None,
   };
+  let (tuned, tune_note) = tune_for_checkpoint(settings, &checkpoint);
+  let settings = &tuned;
   let (width, height) = size_for(&req.aspect_ratio, settings.base_size);
   let negative = req.negative.clone().unwrap_or_else(|| settings.negative.clone());
 
@@ -51,11 +53,69 @@ pub async fn generate(client: &reqwest::Client, settings: &ComfySettings, req: &
       strength: req.strength,
     });
     for mut output in run_graph(client, &base, graph).await? {
+      if let Some(flat) = blank::check(&output.bytes) {
+        return Err(blank_message(flat, Some((settings, &checkpoint))));
+      }
       output.seed = Some(seed);
+      output.note = tune_note.clone().unwrap_or_default();
       outputs.push(output);
     }
   }
   Ok(outputs)
+}
+
+/// Sampling settings that suit the checkpoint. Settings that clearly belong to
+/// another model family are swapped for that family's usual ones, because the
+/// mismatch is the commonest cause of blank results: Flux at CFG 6 burns to
+/// black, and SD/SDXL at 4 steps and CFG 1 stays a flat smear. Settings that
+/// fit are left exactly as they are.
+fn tune_for_checkpoint(settings: &ComfySettings, checkpoint: &str) -> (ComfySettings, Option<String>) {
+  let name = checkpoint.to_ascii_lowercase();
+  let mut tuned = settings.clone();
+  let fast = ["turbo", "lightning", "lcm", "hyper"].iter().any(|w| name.contains(w));
+  if name.contains("flux") {
+    if settings.cfg > 2.0 {
+      tuned.cfg = 1.0;
+      tuned.steps = if name.contains("schnell") { 4 } else { settings.steps.clamp(16, 30) };
+      tuned.sampler = "euler".into();
+      tuned.scheduler = "simple".into();
+      let note = format!(
+        "Flux needs CFG about 1, so Easel used CFG 1, {} steps, euler/simple instead of CFG {} from Settings. Set these in Settings > ComfyUI to keep them.",
+        tuned.steps, settings.cfg
+      );
+      return (tuned, Some(note));
+    }
+  } else if !fast && (settings.cfg < 2.0 || settings.steps < 10) {
+    tuned.cfg = if settings.cfg < 2.0 { 7.0 } else { settings.cfg };
+    tuned.steps = settings.steps.max(25);
+    if tuned.scheduler == "simple" && tuned.sampler == "euler" {
+      tuned.scheduler = "normal".into();
+    }
+    let note = format!(
+      "Settings had {} steps and CFG {} (Flux-style), which leaves this checkpoint blank, so Easel used {} steps and CFG {}. Set these in Settings > ComfyUI to keep them.",
+      settings.steps, settings.cfg, tuned.steps, tuned.cfg
+    );
+    return (tuned, Some(note));
+  }
+  (tuned, None)
+}
+
+/// What to tell the person when ComfyUI hands back a flat image.
+fn blank_message(flat: blank::Flat, used: Option<(&ComfySettings, &str)>) -> String {
+  let mut message = format!("ComfyUI finished, but the image came out {}, so Easel didn't save it.", blank::describe(flat));
+  if flat == blank::Flat::Black {
+    message.push_str(
+      " This usually means the image decoder (VAE) overflowed at half precision, which happens with SDXL's decoder and on AMD cards. \
+       Restart ComfyUI with --fp32-vae added to its start command (on Windows, the end of the python line in run_nvidia_gpu.bat), then try again.",
+    );
+  }
+  if let Some((s, checkpoint)) = used {
+    message.push_str(&format!(
+      " This run used {checkpoint} with {} steps, CFG {}, {}/{}. If those don't suit this checkpoint, change them in Settings > ComfyUI.",
+      s.steps, s.cfg, s.sampler, s.scheduler
+    ));
+  }
+  message
 }
 
 /// Runs one of your saved workflows, filling in its {{placeholders}}.
@@ -97,6 +157,9 @@ pub async fn run_workflow(client: &reqwest::Client, settings: &ComfySettings, wo
     };
     let graph = fill_placeholders(&template, &values);
     for mut output in run_graph(client, &base, graph).await? {
+      if let Some(flat) = blank::check(&output.bytes) {
+        return Err(format!("{} Check the sampler settings inside the workflow \"{}\".", blank_message(flat, None), workflow.name));
+      }
       output.seed = Some(seed);
       outputs.push(output);
     }
@@ -477,6 +540,43 @@ mod tests {
     assert_eq!(filled["3"]["inputs"]["seed"], 42);
     assert_eq!(filled["3"]["inputs"]["width"], 832);
     assert_eq!(filled["3"]["inputs"]["text"], "photo of a fox");
+  }
+
+  #[test]
+  fn flux_with_sdxl_settings_gets_flux_settings() {
+    let s = settings(); // 28 steps, CFG 6: SDXL's
+    let (t, note) = tune_for_checkpoint(&s, "flux1-schnell-fp8.safetensors");
+    assert_eq!((t.steps, t.cfg, t.sampler.as_str(), t.scheduler.as_str()), (4, 1.0, "euler", "simple"));
+    assert!(note.unwrap().contains("CFG 1"));
+  }
+
+  #[test]
+  fn sd_with_flux_settings_gets_real_steps_and_cfg() {
+    let mut s = settings();
+    (s.steps, s.cfg, s.scheduler) = (4, 1.0, "simple".into());
+    let (t, note) = tune_for_checkpoint(&s, "DreamShaper_8_pruned.safetensors");
+    assert_eq!((t.steps, t.cfg, t.scheduler.as_str()), (25, 7.0, "normal"));
+    assert!(note.is_some());
+  }
+
+  #[test]
+  fn fitting_settings_and_fast_models_are_left_alone() {
+    let s = settings();
+    assert!(tune_for_checkpoint(&s, "sd_xl_base_1.0.safetensors").1.is_none());
+    let mut fast = settings();
+    (fast.steps, fast.cfg) = (6, 1.5);
+    assert!(tune_for_checkpoint(&fast, "dreamshaperXL_lightningDPMSDE.safetensors").1.is_none());
+    let mut flux = settings();
+    (flux.steps, flux.cfg) = (4, 1.0);
+    assert!(tune_for_checkpoint(&flux, "flux1-schnell-fp8.safetensors").1.is_none());
+  }
+
+  #[test]
+  fn black_results_point_at_the_vae() {
+    let s = settings();
+    let m = blank_message(blank::Flat::Black, Some((&s, "sd_xl_base_1.0.safetensors")));
+    assert!(m.contains("--fp32-vae") && m.contains("28 steps"));
+    assert!(!blank_message(blank::Flat::Grey, None).contains("--fp32-vae"));
   }
 
   #[test]

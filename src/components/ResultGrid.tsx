@@ -42,6 +42,11 @@ export function ResultGrid({ items }: { items: GalleryItem[] }) {
           </figure>
         ))}
       </div>
+      {notes(items).map((note) => (
+        <p key={note} className="text-sm text-ink-2">
+          {note}
+        </p>
+      ))}
       {error && (
         <p role="alert" className="text-sm text-danger">
           {error}
@@ -49,6 +54,11 @@ export function ResultGrid({ items }: { items: GalleryItem[] }) {
       )}
     </div>
   );
+}
+
+/** Each distinct engine note once, such as settings Easel adjusted for the checkpoint. */
+function notes(items: GalleryItem[]): string[] {
+  return [...new Set(items.map((item) => item.meta?.note?.trim() ?? "").filter(Boolean))];
 }
 
 export function openLabel(apps: ReturnType<typeof useApp.getState>["apps"], path: string): string {
