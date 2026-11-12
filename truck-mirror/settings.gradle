@@ -1,0 +1,18 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // Unofficial Android Auto SDK (com.github.martoreto:aauto-sdk)
+        maven { url 'https://jitpack.io' }
+    }
+}
+rootProject.name = 'truck-mirror'
+include ':app'

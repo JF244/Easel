@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.truckmirror'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.truckmirror'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.1'
+    }
+
+    signingConfigs {
+        // A fixed key kept in the repo so every build can update the one before
+        // it. It protects nothing: this app is only ever sideloaded.
+        sideload {
+            storeFile file('sideload.keystore')
+            storePassword 'truckmirror'
+            keyAlias 'truckmirror'
+            keyPassword 'truckmirror'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.sideload
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.sideload
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    implementation('com.github.martoreto:aauto-sdk:v4.7') {
+        transitive = false
+    }
+    implementation 'com.android.support:support-v4:25.4.0'
+    implementation 'com.android.support:appcompat-v7:25.4.0'
+    implementation 'com.android.support:recyclerview-v7:25.4.0'
+}

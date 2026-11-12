@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Truck Mirror</string>
+    <string name="touch_service_label">Truck Mirror touch control</string>
+    <string name="touch_service_description">Lets taps and swipes on the truck screen control this phone. Truck Mirror does not read what is on your screen through this service.</string>
+</resources>
